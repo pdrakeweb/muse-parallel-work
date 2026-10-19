@@ -1,0 +1,55 @@
+# Parallelism governor limits — TEMPLATE.
+#
+# This is the single place the governor's numbers live. The values below are
+# the REFERENCE deployment's, calibrated to a measured 2 vCPU / 7 GB RAM VM
+# where one cargo build already fans rustc across both cores and peaks at
+# multiple GB. Do NOT adopt them by preference: measure your host first
+# (vCPUs, RAM total and available under load, what one build of your largest
+# project peaks at), then scale:
+#
+#   build_slots   ≈ cores - 1, and also bounded by RAM: one build's peak RSS
+#                   plus the runtime must fit in available RAM with headroom.
+#                   On the reference box both calculations give 1.
+#   light_slots   Light workers are latency-bound (network/inference), not
+#                   CPU-bound; ~150-250 MB each. 4 fit beside one build on
+#                   7 GB. Scale with spare RAM, not with cores.
+#   total_workers The backstop: build_slots + light_slots on the reference
+#                   box (1 + 4 = 5). It keeps mixed loads honest.
+#   loadavg_threshold (circuit breaker) ≈ 2.5x vCPUs on the reference box
+#                   (5.0 on 2 vCPUs). No admissions while load1 exceeds it.
+#
+# The governor reads this file with a tiny built-in parser: keep it flat,
+# two levels, `key: value`, no lists or nesting beyond what you see here.
+budgets:
+  build_slots: 1
+  light_slots: 4
+  total_workers: 5
+aging:
+  promote_after_minutes: 60
+  cap_class: P2
+lock:
+  wait_seconds: 10
+  retry_interval_seconds: 0.1
+lock_steal:
+  p95_multiple: 10
+  floor_seconds: 5
+  min_samples: 5
+circuit_breaker:
+  loadavg_threshold: 5.0
+reservations:
+  admitted_stale_minutes: 5
+  running_absent_minutes: 10
+# Cron reservations: light-equivalents counted as occupied while the named
+# scheduled job is active. The keys are YOUR deployment's job names — the
+# caller lists active jobs by these names in the admission snapshot's
+# "cron_active" array. Rename/add keys to match your own scheduled jobs;
+# unknown names count 0.
+cron_reservations:
+  email_triage: 1
+  camera_sweep: 3
+  reminders_watchdog: 0
+metrics:
+  max_pass_samples: 200
+gates:
+  janitor_cron_active: false
+  interim_cap_in_force: true
