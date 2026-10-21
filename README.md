@@ -4,7 +4,7 @@ A skill for managing **parallel agent work on a shared machine**: how an
 agent system fans work out to sub-agents without saturating the host it is
 also trying to talk to its user on.
 
-It has three layers, in adoption order:
+It has five layers, in adoption order:
 
 1. **Principles** — the chat agent dispatches heavy work to sub-agents and
    stays conversational; fan-out is the default, exercised inside an
@@ -19,6 +19,21 @@ It has three layers, in adoption order:
    here as working code (`governor.py`, stdlib-only Python) with a
    21-test suite, the full design record (`DESIGN.md`), and the
    validation procedure (`REPLAY.md`).
+4. **The backlog and refill** — a general Work Tracker (projects
+   General/LLMdil, six statuses, workstreams as fields and filters) as
+   the backlog of record, and an hourly refill cron that scans it when
+   the governor is idle, classifies items EXECUTABLE / NEEDS PETE /
+   ILL-DEFINED (ill-defined items go to a council; a refined brief at
+   ≥ MEDIUM confidence is enqueued), and enqueues under stable
+   idempotency keys. Fill only — the refill never admits or spawns.
+5. **The janitor and control crons** — a self-contained janitor cron
+   (every 10 minutes) that owns its workers end-to-end and reconciles
+   from the queue log plus /proc evidence — never the worker listing,
+   which cron-lineage sessions verifiably cannot see — under
+   conservative admission rules (state-derived snapshot,
+   unexplained-compiler guard, HOLD file, load breaker, 2-spawn-per-tick
+   cap), plus the admission/control cron inventory and the HOLD
+   protocol.
 
 ## Why it exists
 
@@ -57,24 +72,37 @@ built from that incident.
    rule, the fan-out default, the interim cap, the governor procedure,
    and the deployment location rule — the instructions future sessions
    will actually follow.
+6. Then stand up the backlog layers in order — Work Tracker, refill
+   cron, janitor — following `templates/install-checklist.md` and the
+   cron bodies in `templates/`. The checklist includes the visibility
+   tests and how to interpret their FAIL results.
 
-## Gate status (reference deployment)
+## Status and gate corrections (reference deployment, Oct 21, 2026)
 
-Both of the governor's activation gates are **closed**, deliberately:
+Version 0.1.0 recorded both janitor activation gates as closed. That is
+superseded:
 
-- **Janitor cron: not active.** A janitor would run admission passes on a
-  timer so queued work progresses while nobody is chatting. Its gate is a
-  visibility smoke test — a cron session must see the same worker
-  population the governor reconciles against. The reference deployment
-  ran that test on Oct 19, 2026 and it **failed**: a cron session's
-  worker listing returned 0 agents while chat-dispatched work was
-  verifiably running. A cron session sees only its own session, so
-  janitor-based reconciliation would be unsound. **Admission stays with
-  chats.**
-- **Interim cap: not retired.** The cap and the governor procedure apply
-  together, stricter limit winning, until the smoke test passes *and*
-  the §11 load replay (`REPLAY.md`) passes, and the retirement is called
-  explicitly.
+- **§11 load replay: waived as a janitor gate** by the deployment's owner
+  on Oct 21, 2026. `REPLAY.md` remains an optional validation procedure.
+- **Visibility gate: failed and superseded.** The smoke test failed on
+  Oct 19, 2026 and twice more on Oct 21, 2026 — a cron session's worker
+  listing returned 0 agents while the governor reported 5
+  running/admitted, and an agent spawned by a cron session also saw 0,
+  not even its parent. The gate's purpose (never over-admit while blind)
+  is preserved by the self-contained janitor's conservative rules instead
+  of by the test.
+- **Janitor: active in self-contained conservative mode.** The
+  `governor-janitor` cron (every 10 minutes) reconciles from the queue
+  log and /proc evidence, requeues interrupted items under the attempt
+  cap, and admits/spawns at most 2 items per tick under the HOLD file,
+  the load breaker, slot limits, and an unexplained-compiler guard. One
+  wart: `governor.py status` still prints "janitor cron NOT active" —
+  that line reads the `gates.janitor_cron_active` flag in limits.yaml,
+  and the janitor build was not permitted to change limits values. The
+  cron definition and AGENTS.md are the accurate sources for activation.
+- **Interim cap: still in force** for chat dispatch. The cap and the
+  governor procedure apply together, stricter limit winning; enabling
+  the janitor did not retire it.
 
 Enforcement is conventional throughout: there is no platform scheduler,
 so the governor works because every agent follows the same written
@@ -86,8 +114,12 @@ this README.
 
 | File | What it is |
 |---|---|
-| `SKILL.md` | The agent-facing playbook: principles, both mechanisms, full governor procedure, gates, known gaps. |
-| `AGENTS-TEMPLATE.md` | The AGENTS.md sections to adopt, with two placeholders. |
+| `SKILL.md` | The agent-facing playbook: principles, all mechanisms, full governor procedure, gate corrections, the janitor and refill designs, the cron inventory, known gaps. |
+| `AGENTS-TEMPLATE.md` | The AGENTS.md sections to adopt, with placeholders. |
+| `templates/janitor-cron-body.md` | The janitor cron body as a placeholder template. |
+| `templates/refill-cron-body.md` | The refill cron body as a placeholder template. |
+| `templates/install-checklist.md` | The combined install checklist (governor → tracker → refill → janitor). |
+| `VERSION` | Skill version. |
 | `governor.py` | The reference implementation. |
 | `test_governor.py` | 21 tests covering budgets, promotion order, aging, fan-out, reservations, the breaker, locking, and the CLI. |
 | `limits.yaml` | Template limits with tuning guidance. |

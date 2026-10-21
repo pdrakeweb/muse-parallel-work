@@ -6,8 +6,10 @@
 > Deployment-specific names have been generalized; the reasoning, numbers,
 > and decision records are unchanged. In the reference deployment the
 > interim AGENTS.md concurrency cap (max 4 build-heavy, max 8 light) stayed
-> in force alongside the governor until both activation gates open — see
-> the council-modifications addendum.
+> in force alongside the governor under the activation-gate framing
+> recorded in the council-modifications addendum; that framing is
+> superseded by the v0.2.0 status correction at the end of this document
+> (the cap itself remains in force for chat dispatch).
 
 ## 1. Problem
 
@@ -293,3 +295,32 @@ The design was approved via council (Option B, medium confidence) with four modi
 2. **Promotion order is (effective class, base class, enqueue time).** §5.4 specified ordering within an effective class as FIFO by enqueue time alone, which would let an aged P4 item (effective P2 after two hours) precede a fresh P2 item. The tie-break on base class comes first: at equal effective class, the item whose assigned class is higher goes first; enqueue time only breaks remaining ties.
 3. **The lock-steal threshold comes from measured pass durations, not the 60 s constant in §6.4.** The threshold is a multiple (10x) of the observed p95 admission-pass duration, with a 5 s floor, and applies the floor alone until at least 5 passes have been measured. Pass duration is instrumented from the first run (`metrics.jsonl`). Consequence: a lock is presumed abandoned after seconds, not a minute, because real critical sections are file operations measured in milliseconds — and a waiter whose wait budget expires before the steal threshold fails cleanly with no state change.
 4. **Two activation gates remain CLOSED.** (a) The janitor cron (§7) is not created yet — until it exists, admission passes happen only when a chat dispatches or closes out work, and queued items wait for the next pass rather than being promoted on a 15-minute tick. (b) The interim AGENTS.md cap is not retired — it and the governor procedure apply together, stricter limit winning, until both gates open. The gates open on: the §11 replay passing, and a cron-session visibility smoke test (a one-shot cron confirming that a cron session's `subagent.list` sees the same worker population the governor reconciles against — if cron sessions see a different population, reconciliation from the janitor would be unsound).
+
+## v0.2.0 status correction (Oct 21, 2026)
+
+This section supersedes the gate status recorded in the council
+modifications addendum (item 4) and the janitor framing in §7 and §11,
+which stand as the Oct 18–19, 2026 decision record:
+
+- The cron-session visibility smoke test was run on Oct 19, 2026 and
+  FAILED (a cron session's `subagent.list` returned 0 agents while work
+  was verifiably running). It was retested twice on Oct 21, 2026 and
+  failed both times: a cron session saw 0 agents in both scopes while
+  the governor reported 5 running/admitted, and an agent spawned by a
+  cron session also saw 0 — not its parent, not itself, not other chats.
+  Blindness follows the cron lineage; spawning does not escape it.
+- The owner waived the §11 replay as a janitor activation gate on
+  Oct 21, 2026. The replay remains a validation procedure (REPLAY.md),
+  not a gate.
+- The owner approved a self-contained janitor design the same day, and
+  the `governor-janitor` cron is active in that mode: every 10 minutes
+  (not the 15 in §7), spawning its own workers and closing them out on
+  handoff (closer to §7's option (b) mechanics than the hybrid's
+  hand-to-owner-chat mitigation), reconciling from the queue log plus
+  /proc evidence — never `subagent.list` — under conservative rules:
+  state-derived admission snapshot, unexplained-compiler guard on build
+  admissions, HOLD file, load breaker, slot limits, and a cap of 2
+  spawns per tick. The full as-built description is in SKILL.md
+  (Mechanism 4) and `templates/janitor-cron-body.md`.
+- The interim AGENTS.md cap is NOT retired. It remains in force for chat
+  dispatch, alongside the governor and the janitor.

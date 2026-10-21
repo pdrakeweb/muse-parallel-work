@@ -1,6 +1,6 @@
 ---
 name: "muse-parallel-work"
-version: "0.1.0"
+version: "0.2.0"
 license: MIT
 description: >
   Manage parallel sub-agent work on a shared machine so batch work never
@@ -12,12 +12,22 @@ description: >
   governor — a file-based queue with priority classes P0–P4, admission
   passes, aging, a load circuit breaker, and cron reservations — shipped
   here as a reference implementation (governor.py + tests + design).
-  Includes the AGENTS.md template that teaches agents the rules.
+  Version 0.2.0 covers the operating system around the governor: a Work
+  Tracker backlog of record, an hourly fill-only refill cron that
+  classifies tracker work and enqueues it under stable idempotency keys,
+  a self-contained janitor cron that reconciles from queue state and
+  /proc evidence instead of worker-list visibility, and the
+  admission/control cron inventory, including the HOLD protocol.
+  Includes the AGENTS.md template that teaches agents the rules, plus a
+  templates pack (janitor cron body, refill cron body, install
+  checklist).
 when_to_use: >
   Use when setting up or operating multi-agent parallel work on one host:
   "set up the governor", "enqueue this", "what's queued / what's running",
   "the box is overloaded with agents", "tune the limits", "add the
-  AGENTS.md parallelism sections", or whenever dispatching sub-agents on a
+  AGENTS.md parallelism sections", "set up the janitor", "why is the
+  queue not moving", "scan the work tracker", "refill the queue", "what
+  crons touch admission", or whenever dispatching sub-agents on a
   machine where interactive chat and batch workers share CPU, RAM, and an
   inference queue.
 ---
@@ -25,7 +35,7 @@ when_to_use: >
 # Muse Parallel Work
 
 How to run many agents on one machine without the machine — or the user's
-chat — falling over. Three layers, in the order an adopter meets them:
+chat — falling over. Five layers, in the order an adopter meets them:
 
 1. **Principles** — the dispatch rule and the fan-out default. No tooling.
 2. **The interim concurrency cap** — two budgets counted by hand. No tooling.
@@ -33,10 +43,24 @@ chat — falling over. Three layers, in the order an adopter meets them:
    budgets derived from measured hardware. The reference implementation is
    in this skill: `governor.py`, `test_governor.py`, `limits.yaml`,
    `DESIGN.md`, `REPLAY.md`.
+4. **The backlog** — a Work Tracker that holds pending work as the record,
+   and an hourly refill cron that scans it, classifies what it finds, and
+   enqueues the executable items. Fill only: the refill never admits and
+   never spawns.
+5. **The janitor and the control crons** — a self-contained janitor cron
+   that reconciles and admits on a tick, so the queue moves with nobody
+   chatting, plus the small inventory of crons that touch admission or
+   queue control (the refill, the janitor, and a weekly maintenance job
+   that holds the queue through the HOLD file).
 
-Adopt in order. Each layer keeps working when the next one is added: the
-cap stays in force alongside the governor until the governor's activation
-gates open, and where they conflict the stricter limit wins.
+Adopt in order (the combined sequence is `templates/install-checklist.md`).
+Each layer keeps working when the next one is added: the cap stays in
+force for chat dispatch alongside the governor and the janitor, and where
+they conflict the stricter limit wins. The governor's original janitor
+activation gates were superseded in the reference deployment on
+Oct 21, 2026 — see "Gate status — corrected Oct 21, 2026" below; neither
+the §11 replay nor the worker-list visibility test is a prerequisite for
+the self-contained janitor design.
 
 ## Why this exists
 
@@ -136,7 +160,7 @@ governs admission order only: nothing preempts or kills running work.
 ## Mechanism 1 — the interim concurrency cap (no tooling)
 
 The pre-governor mechanism, and the standing fallback whenever the
-governor's gates are closed:
+governor is unavailable:
 
 - At most **4 build-heavy** sub-agents (cargo/npm builds, test gates) run
   concurrently across **all chats combined**. Further build-heavy
@@ -152,9 +176,12 @@ governor's gates are closed:
 
 This cap is crude — it counts workers, not hardware cost, and it has no
 queue, no priorities, and no memory across chats. That is what the
-governor adds. Keep the cap in force until the governor's activation
-gates (below) have both passed on your deployment; the two systems apply
-together and the stricter limit wins.
+governor adds. Keep the cap in force for chat dispatch alongside the
+governor and the janitor; the systems apply together and the stricter
+limit wins. Retiring the cap is a separate, explicit decision by the
+deployment's owner — it is not a side effect of installing the governor
+or enabling the janitor, and in the reference deployment it has not
+happened.
 
 ## Mechanism 2 — the governor
 
@@ -293,31 +320,338 @@ Until the tool grows an explicit override, the honest handling is: tell
 the user the spawn bypassed admission, spawn only on their explicit
 instruction, and close the item out normally when it lands.
 
-### Activation gates for the janitor — both CLOSED in the reference deployment
+## Gate status — corrected Oct 21, 2026
 
-The design's dispatcher is a hybrid: chats admit opportunistically at
-dispatch time, and a **janitor cron** (every 15 min) runs admission
-passes as a backstop so queued work progresses while nobody is chatting.
-The janitor does **not** activate, and the interim cap is **not**
-retired, until both gates pass:
+Version 0.1.0 recorded both janitor activation gates as CLOSED. That is
+no longer the state of the reference deployment, and the record is
+corrected here rather than left standing:
 
-1. **The §11 replay** (`REPLAY.md`): replay the incident's load shape
-   under the governor and measure — never more than the capped workers,
-   load ≤ ~3, a chat probe answered in under 30 s at peak load, every
-   item completes, the P4 bundle finishes via aging alone.
-2. **The cron-session visibility smoke test:** a one-shot cron confirms
-   its worker listing sees the same population the governor reconciles
-   against. **Result in the reference deployment (Oct 19, 2026): FAILED
-   as a global check.** The cron session's listing returned 0 agents
-   while work was verifiably running in chat sessions — a cron session
-   sees only its own session. Reconciliation from a janitor that cannot
-   see the workers would be unsound, so janitor promotion does not
-   activate and **admission stays with chats**, which have evidenced
-   global visibility.
+| Gate | Status at v0.2.0 | What changed |
+|---|---|---|
+| §11 load replay (`REPLAY.md`) | **Waived as a janitor gate** by the deployment's owner, Oct 21, 2026 | The replay remains a useful validation procedure for a quiet host. It is not a prerequisite for the janitor, and it was never run as a gate. |
+| Cron-session visibility smoke test | **Failed, and superseded** | Failed Oct 19, 2026 and twice more on Oct 21, 2026 (evidence below). The original janitor design reconciled from the platform's worker listing; the self-contained janitor (Mechanism 4) removes that dependency. The gate's purpose — never over-admit while blind — is preserved by the janitor's conservative rules, not by the test. |
+| Interim concurrency cap | **Still in force** for chat dispatch | Enabling the janitor did not retire it. Cap and governor apply together; the stricter limit wins. |
+| Janitor | **Active in self-contained conservative mode** in the reference deployment | The `governor-janitor` cron (every 10 min) was created and enabled Oct 21, 2026, with its governor helpers (`janitor-snapshot`, `admit --block-build`, `requeue-interrupted`) implemented and tested in the live workstream. |
 
-A queue-log-only janitor (promotes from the durable log, reconciles by
-timeouts alone) is the known alternative if the visibility gate cannot
-pass; adopting it is a separate, explicit decision.
+One wart to know when reading `governor.py status` in the reference
+deployment: its gates line still prints "janitor cron NOT active",
+because that line reads the `gates.janitor_cron_active` flag in
+`limits.yaml`, and the janitor build was not permitted to change limits
+values. The cron definition and AGENTS.md are the accurate sources for
+janitor activation; the status line is stale until the flag is updated
+in a separate, permitted change.
+
+## Mechanism 3 — the backlog: the Work Tracker and the refill cron
+
+The governor queue coordinates work that is ready to run. It is not a
+backlog: items enter it when someone (or some cron) has decided the work
+should be done soon. The backlog of record lives one layer up, in a
+**Work Tracker**, and an hourly **refill cron** feeds executable backlog
+items into the queue.
+
+### The Work Tracker
+
+A web-artifact tracker (reference Space slug:
+`llm-service-manager-work-tracker`, generalized from a single-project
+tracker on Oct 20, 2026). Its record shape:
+
+| Field | Values |
+|---|---|
+| `id` | Auto-incrementing integer |
+| `title` | Short work-item title |
+| `project` | **General** or **LLMdil** |
+| `workstream` | One of: Releases, Core and Gateway, UI and Design, Windows Services, MCP Capabilities, Admin API, Android App, Optimize, Prometheus Hardware, Backlog, General |
+| `status` | **Requested**, **Pending**, **In Progress**, **Blocked**, **Done**, **Future** |
+| `details` | Free text: context, links, completion conditions |
+| `created_at` / `updated_at` | Timestamps |
+
+Operating facts that matter to the refill and to agents reading the
+tracker:
+
+- **Projects are a filter, not separate trackers.** The project tabs are a
+  multi-select filter; **General is the default project** — the default
+  tab selection and the default for newly created items.
+- Board view groups items by the six statuses in the order above; table
+  view is sortable by id, title, project, workstream, status, and
+  updated time. Workstream and status are also filters, and search covers
+  the record fields.
+- Actions: list items (returns the items plus the project, workstream,
+  and status enumerations), create item, update item, delete item. Read
+  the tracker through these actions or artifact inspection — never by
+  reading its database file directly.
+- The tracker is the backlog of record; the governor queue is execution
+  coordination. The refill reads the tracker but never edits it. Keeping
+  tracker statuses current remains the item owner's job.
+
+### The refill cron (`governor-queue-refill`, hourly)
+
+The refill exists so the queue does not depend on someone remembering to
+promote backlog items by hand. Its boundary is strict and is a design
+rule, not a workaround for a closed gate: **the refill fills only. It
+never runs an admission pass and never spawns — even with the janitor
+active.** Admission belongs to chats and the janitor. The full cron body
+is `templates/refill-cron-body.md`; the operating summary:
+
+1. **Idle gate.** The refill scans only when the system is genuinely
+   idle — all four: no HOLD file; `governor.py status` shows 0 running
+   and 0 admitted; the queue is empty (0 queued); load1 is below the
+   circuit-breaker threshold configured in `limits.yaml` (read from the
+   status output — the threshold is tuned per deployment and has changed
+   over time; never hardcode it). If any check fails, the run logs and
+   ends silently. This gate is why a stuck queue starves the refill: on
+   Oct 20–21, 2026, three stale governor entries held running/admitted
+   slots for ~16 hours, the refill's idle gate never opened, and no
+   backlog item was enqueued all night. Stale-entry hygiene (the
+   janitor's reconciliation) is what keeps the refill fed.
+2. **Scan.** The Work Tracker is the primary source; the refill also
+   scans any other tracker artifacts it can identify and open runtime
+   tracked items/goals, reading each candidate's linked detail (goal
+   document, artifact record). It skips items that are completed,
+   cancelled, blocked on an external party with no action available, or
+   explicitly waiting on the owner in the tracker itself.
+3. **Classify** each candidate into exactly one class:
+   - **EXECUTABLE** — a self-contained worker brief can be written from
+     the tracker entry plus its linked detail without inventing a
+     decision the owner has not made: concrete outcome, identifiable
+     scope and workspace, checkable completion condition.
+   - **NEEDS PETE** — the next step is a decision, approval, purchase,
+     booking, send, deletion, or policy choice belonging to the owner.
+     Never enqueued, and not council material. Work that spends money,
+     books, sends messages, deletes data, or changes an account is
+     NEEDS PETE by definition.
+   - **ILL-DEFINED** — plausibly executable but missing scope, outcome,
+     or completion condition, and not blocked on an owner decision.
+     These go to council (below).
+4. **Enqueue** executable items, at most **5 per run** (council-refined
+   items count toward the cap):
+   - Duplicate checks first, against governor state (same item key, same
+     tracker id, or near-identical title, live or recently finished) and
+     against the refill's own dispositions file — an item already
+     dispositioned as enqueued is skipped.
+   - The brief is written to `briefs/refill-<item-slug>.md` with the
+     outcome, scope, source tracker reference, completion check, and
+     constraints from the detail documents.
+   - Default class **P3**; **P2** only when the tracker marks the item
+     urgent or a deadline falls within 48 hours. Resource is `build` if
+     the work compiles or test-gates code, else `light`.
+   - Every enqueue carries a **stable idempotency key**:
+     `refill-<source>-<tracker item id or slug>`. The key is also the
+     item's key in the refill's dispositions file
+     (`hidden_files/refill-state.json`, with the run log in
+     `hidden_files/refill-log.md`), so re-runs disposition instead of
+     duplicating.
+5. **Council refinement** for ill-defined items, at most **2 councils
+   per run**, skipping items sent to a council in the last 7 days. The
+   council (classic panel, 2 rounds) gets the tracker item verbatim plus
+   its detail context and one question: define this into an executable
+   brief — outcome, scope, completion check — or rule that an owner
+   decision is required and state exactly which decision. A refined brief
+   at **≥ MEDIUM confidence** is written and enqueued under the normal
+   rules. A Pete-decision ruling, or confidence below MEDIUM, is
+   recorded as a `needs-pete` disposition with the exact decision
+   question, and nothing is enqueued.
+6. **Report** to the main chat only when the run did something: enqueued
+   items (title, class, resource, source tracker, governor item id) and
+   Needs-Pete items with the exact pending decision. Each Needs-Pete
+   item is reported once; it is not re-reported unless 7 days have
+   passed or its tracker entry changed. Not-idle runs, empty scans, and
+   fully-dispositioned scans stay silent.
+
+## Mechanism 4 — the self-contained janitor
+
+The governor is a metering layer, not an executor: before the janitor,
+admission passes happened only when a chat dispatched or closed out
+work. On the night of Oct 20–21, 2026 the queue demonstrated the gap —
+queued items sat unadmitted all night even with load near idle, because
+no chat ran a pass, and stale running/admitted entries (workers long
+finished, never closed out) held slots the whole time. The janitor is
+the cron that closes that gap.
+
+### Why it is self-contained: the visibility verdicts
+
+The original design (DESIGN.md §7) had the janitor reconcile against the
+platform's worker listing, gated on a smoke test proving a cron session
+sees the same population. The test result is definitive:
+
+- **Oct 19, 2026:** a one-shot cron session's worker listing returned
+  **0 agents** while other work was verifiably running.
+- **Oct 21, 2026, 09:44 EDT:** the direct retest returned 0 agents in
+  both direct and descendants scopes while `governor.py status`
+  simultaneously reported **5 running/admitted** and 3 queued.
+- **Oct 21, 2026, 09:51 EDT:** the spawn variant — a cron session spawned
+  exactly one subagent, which ran the listing — also returned **0**: the
+  spawned agent could not see other chats' agents, its siblings, itself,
+  or even its parent. (The parent cron session could see the child in
+  its own list; visibility does not propagate down the lineage.)
+
+Blindness follows the cron session's lineage; spawning does not escape
+it. The self-contained design, approved by the owner on Oct 21, 2026,
+does not try to fix visibility — it removes the need for it. The janitor
+never calls the worker listing and never treats its result as evidence.
+
+### The design
+
+`governor-janitor` runs every **10 minutes** (the DESIGN.md §7 sketch
+said 15, and had the janitor hand admitted items to owner chats to
+spawn; the as-built janitor spawns its own workers instead — see
+"Ownership" below). On every janitor turn:
+
+1. **Close out its own workers first.** If the turn carries a completion
+   or failure handoff for a janitor-spawned worker, match it to its
+   governor item (by the item's recorded `worker_agent_id`, or the item
+   id named in the handoff) and run `governor.py done` / `fail`. A turn
+   that is only a handoff close-out logs and ends there.
+2. **HOLD check.** On a scheduled tick, if the HOLD file exists, nothing
+   else happens this tick; the tick logs the hold and its stated reason
+   and ends silently.
+3. **Requeue interrupted items** (`governor.py requeue-interrupted`):
+   interrupted items return to `queued` below the attempt cap (2) and
+   are failed at the cap, so they reach a terminal state their owner can
+   see instead of sitting interrupted forever.
+4. **Build a state-derived snapshot** (`governor.py janitor-snapshot`):
+   the admission snapshot is constructed from governor state plus /proc
+   evidence — never from the worker listing. Its diagnostics report the
+   live compiler processes, the governor's running build items, and
+   whether compilers are unexplained (below).
+5. **Run one admission pass** (`governor.py admit --snapshot <file>`,
+   with `--block-build` when the guard trips). Slot limits and the load
+   circuit breaker come from `limits.yaml`; while load1 is above the
+   breaker the pass admits nothing, but close-outs and reconciliation
+   still run.
+6. **Spawn at most 2 admitted items per tick**, in the order the pass
+   returned them: read each item's brief file, spawn one subagent with
+   the brief's full contents verbatim, and record
+   `governor.py started --id <item> --worker <agent_id>`. An item whose
+   brief file is missing is never spawned (logged as
+   admitted-but-unspawnable; it does not consume the spawn cap). An item
+   already admitted or running is never spawned again. The janitor does
+   not wait for its workers; their results return as later janitor
+   turns.
+7. **Log every tick** — exactly one line in the janitor log
+   (`hidden_files/janitor-log.md`): timestamp, closed items,
+   requeued items, reaped/reconciled items with their evidence,
+   admitted and spawned items, and the rails state (HOLD, load1,
+   breaker, unexplained compilers).
+
+### Reconciliation and the stale-entry rules
+
+Reconciliation runs from the queue log/state plus /proc, under hard
+safety rails. Every uncertainty resolves to **admit less / reap
+nothing**.
+
+- **Admitted, never started:** an admitted item older than the stale
+  window (`admitted_stale_minutes` in `limits.yaml`; 5 in the template)
+  with no `started` record returns to `queued` in the admission pass and
+  its budgets are released.
+- **Running items** are protected — reported as running in the snapshot,
+  and therefore left alone — when any of these hold:
+  - the item started **less than 60 minutes ago** (the as-built helper
+    applies this blanket to every resource; the brief's hard rule named
+    light items, and the implementation is the conservative superset);
+  - it is a **build item and any compiler process is alive** anywhere on
+    the VM — a build item is **never** reaped while any `cargo`,
+    `rustc`, or `clippy-driver` process lives, because /proc evidence
+    cannot attribute a compiler process to one item, so every build is
+    protected;
+  - explicit liveness evidence for its worker id is supplied.
+- An unprotected running worker is omitted from the snapshot, and the
+  ordinary reconcile rule decides: absent past the running-absent TTL
+  (`running_absent_minutes`; 10 in the template) the item is marked
+  `interrupted`, and the requeue step returns it to `queued` under the
+  attempt cap. Chat-owned entries are reconciled by exactly the same
+  rules — that is what fixes the phantom-entry problem (the three stale
+  entries that held slots for ~16 hours on Oct 20–21, 2026).
+- Every reap is logged with its evidence. Ambiguous evidence leaves the
+  entry and the item alone. And reaping is an accounting action, never a
+  kill: it frees the governor's slot accounting and requeues the item;
+  a worker that was actually still alive keeps running, and its result
+  still returns to its owner.
+
+### Conservative admission
+
+- **State-derived snapshot only.** Usage is counted from the governor's
+  own admitted/running entries after reconciliation. The snapshot's
+  `cron_active` list is always empty in a janitor pass: the janitor does
+  not claim scheduled-job reservations, and is bounded instead by
+  state-derived usage, the load breaker, and the per-tick spawn cap.
+  (Chat-run passes still list active crons in their snapshots; see
+  Mechanism 2.)
+- **Unexplained-compiler guard.** The snapshot scans /proc for `cargo` /
+  `rustc` / `clippy-driver` processes. If compilers are alive and **no**
+  governor running build item exists, they are unexplained: build
+  capacity is treated as fully occupied for that pass (`--block-build`)
+  and only light items may be admitted. The check is at item-class
+  level — the helper does not attribute individual processes to items —
+  so treat it as a coarse guard, not proof that every live compiler
+  belongs to the governor.
+- **HOLD file:** present means the scheduled tick does nothing at all
+  (after any handoff close-out and the log line).
+- **Load breaker:** load1 above the `limits.yaml` threshold admits
+  nothing that pass.
+- **Spawn cap:** at most **2 spawns per tick**, however many items the
+  pass admits; extra admitted items stay admitted for later passes to
+  reconcile.
+- **Never** spawn an item whose brief is missing, an item already
+  admitted/running, or any P1 work — P1 never enters this system.
+
+### Ownership and supervised mode
+
+The janitor **owns the workers it spawns end-to-end**: their handoffs
+return to the janitor's lineage, and closing them out in the governor is
+the janitor's first act on every subsequent turn. Workers still route
+their final reports per their briefs (the item's owner chat is recorded
+on the item); the janitor's close-out is what the governor records.
+
+Reporting is **supervised mode** until the owner changes it: every tick
+appends its log line; a tick that took any action (close, requeue, fail,
+reap, admit, spawn) also reports briefly to the main chat; a no-action
+tick stays silent.
+
+The janitor never enqueues new work, never edits `queue.jsonl` or
+`state.json` by hand, and never changes `limits.yaml`.
+
+### Implementation prerequisite
+
+The janitor depends on three governor commands — `janitor-snapshot`,
+`admit --block-build`, and `requeue-interrupted`. The core `governor.py`
+shipped in this skill predates them; the reference deployment added
+them on Oct 21, 2026 with unit tests (snapshot protection rules, the
+block-build pass, the /proc compiler scan, interrupted requeue under
+the attempt cap, and an end-to-end phantom-reaping flow). Port that
+behavior, with tests, before enabling the janitor cron from
+`templates/janitor-cron-body.md` — the checklist
+(`templates/install-checklist.md`) makes it a gate.
+
+## Admission/control cron inventory
+
+Every cron that touches admission or queue control, with its role and
+its boundary. Scheduled jobs that merely consume reservations (email
+triage, scan sweeps, reminders) are not control crons: the governor
+cannot admit, delay, or preempt them, and they never touch the queue.
+
+| Cron | Cadence (reference) | Role | Boundary |
+|---|---|---|---|
+| `governor-janitor` | Every 10 min | Admit, spawn (max 2/tick), reconcile, close out its own workers | Never enqueues; never reads the worker listing; HOLD stops its tick; state + /proc evidence only |
+| `governor-queue-refill` | Hourly | Fill the queue from the trackers when the governor is idle | Fill only — never admits, never spawns, never edits a tracker |
+| `weekly-binary-updates` | Sundays ~03:00 local | Toolchain maintenance (Rust toolchain, sccache, mold, Python environments) under a queue HOLD | Not an admission authority: it enqueues/starts its own governor item when a pass admits it, but the HOLD file is the operative mechanism; it waits for a compiler-quiet window and removes only its own HOLD |
+
+### The HOLD protocol
+
+- **Who may write it:** any operator or job that must pause admissions —
+  in practice the weekly binary-update job, and the owner or a chat
+  acting on the owner's instruction.
+- **Contents:** the holder writes its reason and start time (an ISO
+  timestamp) inside `<governor-dir>/HOLD`. The weekly job writes the
+  timestamp and its reason as the file's content.
+- **Effect:** while HOLD exists, every admission pass admits nothing and
+  the janitor's scheduled tick stops after its log line. Chat dispatch
+  also checks for it before running a pass.
+- **Removal:** the holder removes its own HOLD when done — and only its
+  own. A job that finds someone else's HOLD in place does not overwrite
+  it: the weekly job aborts if the existing HOLD is under 3 hours old.
+- **Staleness:** a HOLD older than **3 hours** is stale. Any chat may
+  remove a stale HOLD after noting the fact in its reply; the weekly job
+  notes a stale HOLD, removes it, and then writes its own.
 
 ## Tuning `limits.yaml`
 
@@ -332,21 +666,28 @@ numbers plus the derivation. The procedure for a new host:
 3. Set `light_slots` from spare RAM (~150–250 MB per light worker) and
    the total: `total_workers` = build + light as the starting point.
 4. Set the breaker at ~2.5x vCPUs.
-5. Run the test suite (`python3 -m unittest test_governor`), then the
-   replay when the host is quiet enough to measure honestly.
+5. Run the test suite (`python3 -m unittest test_governor`). The §11
+   replay (`REPLAY.md`) is an optional validation run for a quiet host;
+   since Oct 21, 2026 it is not an activation gate for anything.
 
 ## Setting up AGENTS.md
 
 The rules only work if every future session loads them. `AGENTS-TEMPLATE.md`
 in this skill is a ready-to-paste AGENTS.md section covering: the dispatch
 rule, the parallelism default with the composition clause, the interim
-cap, the governor procedure, the queue hold, the home-directory deployment
-rule, and setup notes (where the governor files live, how `state.json` and
-`queue.jsonl` relate, how to check status, how to adapt the numbers).
-Fill in its two placeholders (governor directory, your tuned limits) and
-paste it into the AGENTS.md your runtime loads.
+cap, the governor procedure, the queue hold and HOLD protocol, the
+backlog/refill/janitor rules and the gate corrections, the home-directory
+deployment rule, and setup notes (where the governor files live, how
+`state.json` and `queue.jsonl` relate, how to check status, how to adapt
+the numbers). Fill in its placeholders (governor directory, your tuned
+limits, and the automation placeholders: tracker slug, governor goal
+workspace, council skill path, owner goal, main chat id) and paste it
+into the AGENTS.md your runtime loads.
 
 ## Install
+
+The full sequence, with verification at each step, is
+`templates/install-checklist.md`. In outline:
 
 1. Copy this skill folder to your skills directory (reference:
    `~/workspace/custom-skills/muse-parallel-work/`).
@@ -359,8 +700,19 @@ paste it into the AGENTS.md your runtime loads.
 4. Verify: `cd <governor-dir> && python3 -m unittest test_governor`
    (21 tests) and `python3 governor.py status`.
 5. Paste the filled-in `AGENTS-TEMPLATE.md` section into your AGENTS.md.
-6. Operate under the interim cap + governor procedure together until
-   both activation gates pass on your deployment.
+   Operate under the interim cap + governor procedure together from here
+   on; the cap remains in force for chat dispatch through every later
+   step.
+6. Stand up the Work Tracker (projects General/LLMdil, the six statuses,
+   the workstream enumeration) as the backlog of record.
+7. Create the refill cron from `templates/refill-cron-body.md` (hourly,
+   fill only) and run one supervised pass.
+8. Run the visibility tests and record the evidence. A FAIL blocks only
+   the old visibility-based janitor design; the self-contained design
+   proceeds. Then port the janitor helper commands if your governor
+   build lacks them, create the janitor cron from
+   `templates/janitor-cron-body.md`, and run one supervised first tick
+   before leaving it enabled.
 
 ## Files in this skill
 
@@ -372,7 +724,10 @@ paste it into the AGENTS.md your runtime loads.
 | `governor.py` | The reference implementation (stdlib-only Python 3). |
 | `test_governor.py` | 21-test unittest suite for governor.py. |
 | `limits.yaml` | Template limits with tuning guidance. |
-| `DESIGN.md` | The full design and decision record, incl. the council-modifications addendum. |
-| `REPLAY.md` | The §11 validation procedure. |
+| `DESIGN.md` | The full design and decision record, incl. the council-modifications addendum and the v0.2.0 status correction. |
+| `REPLAY.md` | The §11 validation procedure (optional validation since Oct 21, 2026; not an activation gate). |
+| `templates/janitor-cron-body.md` | The janitor cron body, with placeholders — the self-contained conservative design as a deployable template. |
+| `templates/refill-cron-body.md` | The refill cron body, with placeholders — idle gate, classification, council refinement, idempotent enqueue. |
+| `templates/install-checklist.md` | The combined install checklist: governor → tracker → refill → janitor, with verification steps. |
 | `examples/example-brief.md` | A self-contained item brief, as written at enqueue. |
 | `VERSION` | Skill version. |

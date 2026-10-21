@@ -1,6 +1,6 @@
 # §11 Replay — Procedure
 
-The validation run from DESIGN.md §11: replay the Oct 18, 2026 load shape under the governor and measure whether the incident recurs. **Status: NOT YET RUN.** The box is currently carrying the real backlog; run this only when that backlog has drained and the user (or the supervisor) calls it. This document is the procedure, not a result.
+The validation run from DESIGN.md §11: replay the Oct 18, 2026 load shape under the governor and measure whether the incident recurs. **Status: NOT YET RUN — and, since Oct 21, 2026, no longer an activation gate for the janitor in the reference deployment: the owner waived it as a gate, and the self-contained janitor design does not depend on it.** It remains an optional validation procedure: run it only when the backlog has drained and the user (or the supervisor) calls it. This document is the procedure, not a result.
 
 ## Preconditions
 
@@ -44,5 +44,5 @@ Enqueue the Oct 18 mix through the normal procedure (brief, `governor.py enqueue
 ## After the run
 
 - Write the results into STATUS.md (samples summary, peak load, probe latency, per-criterion pass/fail).
-- If all criteria pass, this replay is one of the two activation gates: the janitor cron may be created and the interim AGENTS.md cap retired — but only on the user's or the supervisor's explicit call, in a separate task. The replay passing does not open the gates by itself.
+- If all criteria pass, record the result as validation evidence in STATUS.md. The replay does not gate janitor activation (waived as a gate Oct 21, 2026), and it does not retire the interim cap: enabling mechanisms or retiring the cap is always the user's or the supervisor's explicit call, in a separate task.
 - If any criterion fails, the failure, the samples around it, and the suspected cause go into STATUS.md, and `limits.yaml` is the first tuning surface (light slots down is the expected first move).

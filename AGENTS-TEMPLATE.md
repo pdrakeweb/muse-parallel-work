@@ -1,12 +1,23 @@
 # AGENTS.md template — parallel work sections
 
 > TEMPLATE. Paste the sections below into the AGENTS.md your agent runtime
-> loads, after filling in the two placeholders:
+> loads, after filling in the placeholders:
 >
 > - `{{GOVERNOR_DIR}}` — the governor directory, under the home directory
 >   (reference value: `~/workspace/parallelism-governor`).
 > - `{{LIMITS_SUMMARY}}` — your tuned budgets in one line (reference value:
 >   `build 1, light 4, total 5`).
+> - `{{WORK_TRACKER_SLUG}}` — the Work Tracker artifact's Space slug
+>   (reference value: `llm-service-manager-work-tracker`).
+> - `{{GOVERNOR_GOAL_WORKSPACE}}` — the goal workspace holding the
+>   refill/janitor bookkeeping (reference value:
+>   `~/workspace/goals/parallelism-governor`).
+> - `{{COUNCIL_SKILL_PATH}}` — the council skill the refill uses for
+>   ill-defined items (reference value:
+>   `~/workspace/custom-skills/council/SKILL.md`).
+> - `{{OWNER_GOAL}}` — the owner recorded on the control crons (reference
+>   value: `goal:parallelism-governor`).
+> - `{{MAIN_CHAT_ID}}` — the chat that receives control-cron reports.
 >
 > Everything else is written to be adopted verbatim. The wording is the
 > operating contract between future sessions; change it deliberately, in
@@ -64,9 +75,9 @@ many at once as the hardware serves well.
 
 ## Concurrency cap: chat responsiveness outranks throughput
 
-Until the governor's activation gates open (see the governor section),
-this cap and the governor procedure apply together; where they conflict,
-the stricter limit wins:
+This cap and the governor procedure apply together — including after the
+self-contained janitor is enabled — and where they conflict, the stricter
+limit wins:
 
 - At most 4 build-heavy subagents (cargo/npm builds, test gates) run
   concurrently across ALL chats combined. Further build-heavy dispatches
@@ -120,12 +131,62 @@ every chat:
   time inside the file and removes it when done. A HOLD older than 3
   hours is stale: any chat may remove it after noting the fact in its
   reply.
-- Gate status: the janitor cron is NOT active until both activation
-  gates pass (the DESIGN.md §11 replay and a cron-session visibility
-  smoke test) — admission passes happen only when a chat dispatches or
-  closes out work — and the interim cap above remains in force until
-  then.
+- Gate status (corrected Oct 21, 2026): the janitor cron
+  (`governor-janitor`, every 10 min) runs in self-contained conservative
+  mode — it reconciles from the queue log plus /proc evidence, never the
+  sub-agent listing (cron-lineage sessions verifiably see zero agents:
+  visibility tests failed Oct 19 and twice on Oct 21, 2026), requeues
+  interrupted items under the attempt cap, and admits/spawns at most 2
+  items per tick under the HOLD file, the limits.yaml load breaker, slot
+  limits, and an unexplained-compiler guard on build admissions. The
+  DESIGN.md §11 replay is NOT a janitor gate (waived as a gate by the
+  owner, Oct 21, 2026); the visibility gate is superseded by the
+  self-contained design. The interim cap above remains in force for chat
+  dispatch; the cap and this procedure apply together, and where they
+  conflict, the stricter limit wins.
 - Check state any time with `python3 {{GOVERNOR_DIR}}/governor.py status`.
+
+## Backlog, refill, and control crons
+
+- Backlog of record: the Work Tracker (Space slug
+  `{{WORK_TRACKER_SLUG}}`) holds pending work; the governor queue holds
+  work ready to run. Tracker projects are General (the default) and
+  LLMdil, as a multi-select filter; statuses are Requested / Pending /
+  In Progress / Blocked / Done / Future; workstreams are a field and a
+  filter. Do not invent projects, statuses, or workstreams — read the
+  enumerations from the tracker.
+- Refill: the `governor-queue-refill` cron (hourly, owner
+  `{{OWNER_GOAL}}`) scans the trackers only when the governor is fully
+  idle (no HOLD, 0 running/admitted, 0 queued, load below the breaker),
+  classifies items EXECUTABLE / NEEDS PETE / ILL-DEFINED, sends
+  ill-defined items to a council (a refined brief at ≥ MEDIUM confidence
+  may be enqueued), and enqueues at most 5 items per run under stable
+  idempotency keys (`refill-<source>-<tracker item id or slug>`). It
+  FILLS ONLY — it never runs an admission pass and never spawns, even
+  with the janitor active. Bookkeeping:
+  `{{GOVERNOR_GOAL_WORKSPACE}}/hidden_files/refill-log.md` and
+  `refill-state.json`. Council procedure: `{{COUNCIL_SKILL_PATH}}`.
+- Janitor: the `governor-janitor` cron (every 10 min, owner
+  `{{OWNER_GOAL}}`) owns the workers it spawns end-to-end: it closes
+  them out on handoff before anything else, reconciles stale entries
+  from queue state + /proc under the safety rails (never reap a build
+  item while any compiler process lives; never reap a light item under
+  60 minutes old; ambiguity admits less), admits from a state-derived
+  snapshot, and spawns at most 2 items per tick. It never enqueues work
+  and never edits the queue files by hand. Supervised mode: action ticks
+  report to the main chat (`{{MAIN_CHAT_ID}}`); no-action ticks stay
+  silent; every tick appends one line to
+  `{{GOVERNOR_GOAL_WORKSPACE}}/hidden_files/janitor-log.md`.
+- Other control cron: `weekly-binary-updates` (Sundays ~03:00 local)
+  maintains the toolchain binaries under ~/bin and the Python
+  environments under the HOLD protocol — it writes its HOLD, waits for a
+  compiler-quiet window, and removes only its own HOLD. It is not an
+  admission authority.
+- HOLD protocol: the holder writes its reason and start time inside
+  `{{GOVERNOR_DIR}}/HOLD` and removes only its own HOLD when done. A
+  HOLD older than 3 hours is stale: any chat may remove it after noting
+  the fact in its reply; a job that finds a HOLD under 3 hours old
+  leaves it in place (the weekly job aborts).
 
 ## Deployment location rule
 
