@@ -13,6 +13,20 @@ The script cannot see live workers by itself: the calling agent obtains a
 snapshot from subagent.list and passes it to `admit` as JSON:
   {"agents": [{"agent_id": "...", "status": "running|done|failed|..."}],
    "cron_active": ["email_triage", "camera_sweep"]}
+
+Exception: the governor-janitor cron (self-contained mode, Oct 21, 2026)
+cannot use subagent.list — cron-lineage sessions verifiably see zero
+agents. It builds its snapshot from governor state + /proc evidence via
+`janitor-snapshot` / build_janitor_snapshot below, and blocks build
+admissions outright when compiler processes are alive that no running
+build item explains (`admit --block-build`).
+
+Workers on tracker-linked items (item field `tracker_ref`, the Work
+Tracker entry id) also write GOVERNOR-CHECKPOINT heartbeats into that
+entry's details at least every 5 minutes. The janitor reads the tracker
+entries back, extracts the checkpoints (`extract-checkpoints`), and
+passes them to the snapshot: a checkpoint younger than 10 minutes
+protects its item exactly like a live sighting.
 """
 import argparse
 import json
@@ -322,6 +336,202 @@ def fits(item, u, limits):
     return u["light"] + 1 <= int(lim(limits, "budgets", "light_slots", 4))
 
 
+# ---------- janitor support (self-contained mode, Oct 21 2026) ----------
+
+COMPILER_COMMS = ("cargo", "rustc", "clippy-driver")
+# Brief hard rules: never reap a light item younger than 60 minutes; the
+# same blanket is applied to builds (a conservative superset), and a build
+# item of any age is protected while compiler processes are alive.
+JANITOR_PROTECT_MINUTES = 60.0
+JANITOR_MAX_ATTEMPTS = 2  # DESIGN S10: auto-requeue below this, then fail
+
+# Checkpoint heartbeats (Oct 21, 2026): a worker on a tracker-linked
+# item writes a GOVERNOR-CHECKPOINT line into its Work Tracker entry's
+# details at least every 5 minutes (see parse_checkpoint for the
+# format). A checkpoint younger than CHECKPOINT_FRESH_MINUTES is
+# liveness evidence equal to the <60-minute blanket above; a stale or
+# missing checkpoint confers nothing, and checkpoints never protect
+# terminal items (the snapshot only ever lists running ones).
+CHECKPOINT_MARKER = "GOVERNOR-CHECKPOINT"
+CHECKPOINT_FRESH_MINUTES = 10.0
+CHECKPOINT_SKEW_SECONDS = 60.0  # tolerated future skew on checkpoint ts
+
+
+def _norm_tracker_ref(ref):
+    """Tracker entry ids are integers; accept int-like strings so CLI
+    callers can pass them verbatim. Anything else is kept as-is."""
+    if ref is None:
+        return None
+    try:
+        return int(ref)
+    except (TypeError, ValueError):
+        return str(ref)
+
+
+def parse_checkpoint(details):
+    """Extract the last GOVERNOR-CHECKPOINT heartbeat from a Work
+    Tracker entry's details text. Format (a single line, conventionally
+    the last line of details):
+      GOVERNOR-CHECKPOINT {"item": "<governor item id>",
+                            "ts": <epoch seconds>,
+                            "state": "<one-line state>"}
+    Returns {"item", "ts", "state"} or None when absent/malformed."""
+    if not details:
+        return None
+    found = None
+    for line in str(details).splitlines():
+        line = line.strip()
+        if not line.startswith(CHECKPOINT_MARKER):
+            continue
+        try:
+            data = json.loads(line[len(CHECKPOINT_MARKER):].strip())
+            found = {"item": str(data["item"]), "ts": float(data["ts"]),
+                     "state": str(data.get("state", ""))}
+        except Exception:
+            continue
+    return found
+
+
+def extract_checkpoints(tracker_items):
+    """Map governor item id -> {"ts", "tracker_id", "state"} from Work
+    Tracker entries (the item dicts the tracker's listitems action
+    returns). When two entries claim the same governor item, the
+    freshest checkpoint wins."""
+    out = {}
+    for entry in tracker_items or []:
+        if not isinstance(entry, dict):
+            continue
+        cp = parse_checkpoint(entry.get("details"))
+        if cp is None:
+            continue
+        prev = out.get(cp["item"])
+        if prev is None or cp["ts"] > prev["ts"]:
+            out[cp["item"]] = {"ts": cp["ts"],
+                               "tracker_id": entry.get("id"),
+                               "state": cp["state"]}
+    return out
+
+
+def _checkpoint_fresh(item, checkpoints, now):
+    """True when the item's linked tracker entry carries a checkpoint
+    naming this item, younger than CHECKPOINT_FRESH_MINUTES. The link
+    is the item's tracker_ref: without it the item gets no checkpoint
+    protection, and a checkpoint carried by any other entry confers
+    nothing."""
+    if not checkpoints:
+        return False
+    ref = item.get("tracker_ref")
+    if ref is None:
+        return False
+    cp = checkpoints.get(item["id"])
+    if not cp:
+        return False
+    if str(cp.get("tracker_id")) != str(ref):
+        return False
+    try:
+        age = now - float(cp["ts"])
+    except (TypeError, ValueError):
+        return False
+    return -CHECKPOINT_SKEW_SECONDS <= age < CHECKPOINT_FRESH_MINUTES * 60
+
+
+def scan_compiler_processes(proc_root="/proc"):
+    """Live compiler processes from /proc (by comm name). Evidence for
+    the janitor's guards; best-effort and never raises."""
+    found = []
+    try:
+        names = os.listdir(proc_root)
+    except Exception:
+        return found
+    for name in names:
+        if not name.isdigit():
+            continue
+        try:
+            with open(os.path.join(proc_root, name, "comm")) as f:
+                comm = f.read().strip()
+        except Exception:
+            continue
+        if comm in COMPILER_COMMS:
+            found.append({"pid": int(name), "comm": comm})
+    return found
+
+
+def build_janitor_snapshot(store, now=None, compiler_alive=False,
+                           live_agent_ids=(), checkpoints=None):
+    """Admission snapshot for the janitor, derived ONLY from governor
+    state plus /proc evidence — never from subagent.list (cron-lineage
+    sessions see zero agents; visibility tests Oct 19 and Oct 21, 2026).
+
+    A running item's worker is reported "running" (protected from
+    reconciliation) when ANY of these hold:
+      - the item started less than JANITOR_PROTECT_MINUTES ago;
+      - it is a build item and compiler processes are alive anywhere on
+        the VM (they cannot be attributed to one item, so every build
+        is protected);
+      - its worker id is in live_agent_ids (explicit liveness evidence);
+      - its linked Work Tracker entry carries a checkpoint younger
+        than CHECKPOINT_FRESH_MINUTES (checkpoints: the map produced
+        by extract_checkpoints; see _checkpoint_fresh for the binding
+        rules). Only running items are ever listed, so a checkpoint
+        can never protect a terminal item or block a close-out.
+    Otherwise the worker is omitted, and the ordinary reconcile rules
+    (running-absent TTL) decide. cron_active is always empty: cron
+    reservations are declared by chat passes that can see the crons;
+    janitor admissions are bounded by state-derived usage, the load
+    circuit-breaker, and the per-tick spawn cap in the janitor's body."""
+    now = time.time() if now is None else now
+    live = set(live_agent_ids or ())
+    agents = []
+    for it in store.state["items"].values():
+        if it["state"] != "running":
+            continue
+        wid = it.get("worker_agent_id")
+        if not wid:
+            continue
+        young = (now - (it.get("started_at") or 0)) \
+            < JANITOR_PROTECT_MINUTES * 60
+        if young or (it["resource"] == "build" and compiler_alive) \
+                or wid in live or _checkpoint_fresh(it, checkpoints, now):
+            agents.append({"agent_id": wid, "status": "running"})
+    return {"agents": agents, "cron_active": []}
+
+
+def do_requeue_interrupted(store, now=None, max_attempts=JANITOR_MAX_ATTEMPTS):
+    """DESIGN S10 standing rule for interrupted items: below the attempt
+    cap an interrupted item returns to queued at its original class; at
+    the cap it is failed, so the item reaches a terminal state its owner
+    can see instead of sitting interrupted forever."""
+    now = time.time() if now is None else now
+    store.acquire_lock()
+    try:
+        requeued, failed = [], []
+        for it in store.state["items"].values():
+            if it["state"] != "interrupted":
+                continue
+            it["worker_agent_id"] = None
+            it["started_at"] = None
+            if int(it.get("attempts", 0)) < int(max_attempts):
+                it["state"] = "queued"
+                it["finished_at"] = None
+                _emit(store, "requeue", it, now,
+                      {"via": "janitor_interrupted"})
+                requeued.append(it["id"])
+            else:
+                it["state"] = "failed"
+                it["finished_at"] = now
+                it["last_error"] = ((it.get("last_error") or "")
+                                    + " [janitor: max attempts reached]"
+                                    ).strip()
+                _emit(store, "failed", it, now,
+                      {"via": "janitor_max_attempts"})
+                failed.append(it["id"])
+        store.state["updated_at"] = now_iso(now)
+        store.save_state()
+        return {"requeued": requeued, "failed": failed}
+    finally:
+        store.release_lock()
+
+
 # ---------- operations (each assumes the caller holds the lock, except
 # enqueue/admit/started/done/fail which take it themselves) ----------
 
@@ -346,6 +556,7 @@ def _new_id(title, now, items):
 def do_enqueue(store, title, cls="P3", resource="light", owner_chat_id=None,
                owner_chat_name=None, brief_text=None, brief_file=None,
                resume_pointer=None, depends_on=None, idempotency_key=None,
+               tracker_ref=None,
                fanout=1, now=None, _bundle=None, _bundle_index=None):
     now = time.time() if now is None else now
     if cls not in CLASS_RANK or cls == "P1":
@@ -398,6 +609,7 @@ def do_enqueue(store, title, cls="P3", resource="light", owner_chat_id=None,
             "resume_pointer": resume_pointer,
             "depends_on": list(depends_on or []),
             "idempotency_key": idempotency_key,
+            "tracker_ref": _norm_tracker_ref(tracker_ref),
             "fanout": int(fanout) if _bundle == "self" else 1,
             "bundle": None if _bundle in (None, "self") else _bundle,
             "bundle_parent": _bundle == "self",
@@ -486,9 +698,13 @@ def _reconcile(store, snapshot, now):
     return interrupted, requeued
 
 
-def do_admit(store, snapshot, now=None, load1=None):
+def do_admit(store, snapshot, now=None, load1=None,
+             block_resources=frozenset()):
     """One admission pass. Returns a result dict; the caller spawns the
-    admitted items outside this call."""
+    admitted items outside this call. Resources in block_resources are
+    treated as fully occupied for this pass (the janitor's unexplained-
+    compiler guard blocks "build" this way) while other resources are
+    admitted normally."""
     started = time.monotonic()
     now = time.time() if now is None else now
     load1 = read_loadavg() if load1 is None else load1
@@ -507,6 +723,8 @@ def do_admit(store, snapshot, now=None, load1=None):
                       and deps_done(it, store.state["items"])]
             queued.sort(key=lambda it: promotion_key(it, now, store.limits))
             for it in queued:  # skip items that do not fit; never block behind one
+                if it["resource"] in block_resources:
+                    continue
                 if fits(it, u, store.limits):
                     it["state"] = "admitted"
                     it["admitted_at"] = now
@@ -520,6 +738,7 @@ def do_admit(store, snapshot, now=None, load1=None):
         duration = time.monotonic() - started
         result = {"admitted": admitted, "interrupted": interrupted,
                   "requeued": requeued, "circuit_breaker": breaker,
+                  "blocked_resources": sorted(block_resources),
                   "load1": load1, "duration_s": round(duration, 6)}
         store.record_pass(duration, len(admitted))
         return result
@@ -527,7 +746,7 @@ def do_admit(store, snapshot, now=None, load1=None):
         store.release_lock()
 
 
-def do_started(store, item_id, worker_agent_id, now=None):
+def do_started(store, item_id, worker_agent_id, now=None, tracker_ref=None):
     now = time.time() if now is None else now
     store.acquire_lock()
     try:
@@ -540,6 +759,8 @@ def do_started(store, item_id, worker_agent_id, now=None):
         it["state"] = "running"
         it["worker_agent_id"] = worker_agent_id
         it["started_at"] = now
+        if tracker_ref is not None:
+            it["tracker_ref"] = _norm_tracker_ref(tracker_ref)
         _emit(store, "start", it, now)
         store.state["updated_at"] = now_iso(now)
         store.save_state()
@@ -666,15 +887,39 @@ def main(argv=None):
     p.add_argument("--resume-pointer")
     p.add_argument("--depends-on", action="append", default=[])
     p.add_argument("--idempotency-key")
+    p.add_argument("--tracker-ref",
+                   help="Work Tracker entry id this item is linked to "
+                        "(enables checkpoint protection)")
     p.add_argument("--fanout", type=int, default=1)
 
     p = sub.add_parser("admit")
     p.add_argument("--snapshot", help="JSON snapshot file from subagent.list "
                                      "('-' for stdin); omit for an empty snapshot")
+    p.add_argument("--block-build", action="store_true",
+                   help="treat build capacity as fully occupied this pass "
+                        "(janitor unexplained-compiler guard)")
+
+    p = sub.add_parser("janitor-snapshot")
+    p.add_argument("--out", help="also write the snapshot JSON to this file")
+    p.add_argument("--checkpoints",
+                   help="JSON file of extracted checkpoints (output of "
+                        "extract-checkpoints); fresh checkpoints protect "
+                        "their running items")
+
+    p = sub.add_parser("extract-checkpoints")
+    p.add_argument("--tracker-json", required=True,
+                   help="file holding the Work Tracker listitems result "
+                        "JSON (or a bare items list)")
+    p.add_argument("--out", help="also write the checkpoints map JSON "
+                                 "to this file")
+
+    sub.add_parser("requeue-interrupted")
 
     p = sub.add_parser("started")
     p.add_argument("--id", required=True)
     p.add_argument("--worker", required=True)
+    p.add_argument("--tracker-ref",
+                   help="set/refresh the item's Work Tracker entry link")
 
     p = sub.add_parser("done")
     p.add_argument("--id", required=True)
@@ -699,16 +944,61 @@ def main(argv=None):
                              resume_pointer=args.resume_pointer,
                              depends_on=args.depends_on,
                              idempotency_key=args.idempotency_key,
+                             tracker_ref=args.tracker_ref,
                              fanout=args.fanout)
             print(json.dumps(out))
         elif args.cmd == "admit":
             snapshot = _load_snapshot(args.snapshot)
             load_override = os.environ.get("GOVERNOR_LOAD1")
+            blocked = frozenset(["build"]) if args.block_build else frozenset()
             out = do_admit(store, snapshot,
-                           load1=float(load_override) if load_override else None)
+                           load1=float(load_override) if load_override else None,
+                           block_resources=blocked)
             print(json.dumps(out))
+        elif args.cmd == "janitor-snapshot":
+            compilers = scan_compiler_processes()
+            checkpoints = None
+            if args.checkpoints:
+                with open(args.checkpoints) as f:
+                    checkpoints = json.load(f)
+            snap = build_janitor_snapshot(
+                store, compiler_alive=bool(compilers),
+                checkpoints=checkpoints)
+            if args.out:
+                with open(args.out, "w") as f:
+                    f.write(json.dumps(snap) + "\n")
+            running_builds = [it["id"] for it in store.state["items"].values()
+                              if it["state"] == "running"
+                              and it["resource"] == "build"]
+            checkpoint_protected = sorted(
+                it["id"] for it in store.state["items"].values()
+                if it["state"] == "running"
+                and _checkpoint_fresh(it, checkpoints, time.time()))
+            print(json.dumps({
+                "snapshot": snap,
+                "compiler_processes": compilers,
+                "running_build_items": running_builds,
+                "unexplained_compilers": bool(compilers) and not running_builds,
+                "checkpoint_protected": checkpoint_protected,
+            }))
+        elif args.cmd == "extract-checkpoints":
+            with open(args.tracker_json) as f:
+                raw = json.load(f)
+            entries = raw
+            if isinstance(raw, dict):
+                entries = (raw.get("data") or {}).get("items") \
+                    or raw.get("items") or []
+            checkpoints = extract_checkpoints(entries)
+            if args.out:
+                with open(args.out, "w") as f:
+                    f.write(json.dumps(checkpoints) + "\n")
+            print(json.dumps({"checkpoints": checkpoints,
+                              "count": len(checkpoints)}))
+        elif args.cmd == "requeue-interrupted":
+            print(json.dumps(do_requeue_interrupted(store)))
         elif args.cmd == "started":
-            print(json.dumps(do_started(store, args.id, args.worker)))
+            print(json.dumps(do_started(store, args.id, args.worker,
+                                        tracker_ref=args.tracker_ref)))
         elif args.cmd == "done":
             print(json.dumps(do_close(store, args.id, "done")))
         elif args.cmd == "fail":

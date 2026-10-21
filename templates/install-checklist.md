@@ -27,7 +27,7 @@
       build + light as the starting point; breaker ≈ 2.5x vCPUs). The
       shipped numbers are the reference host's, not defaults to copy.
 - [ ] Verify: `cd {{GOVERNOR_DIR}} && python3 -m unittest test_governor`
-      (21 tests) and `python3 governor.py status`.
+      (46 tests) and `python3 governor.py status`.
 - [ ] Fill in `AGENTS-TEMPLATE.md` and paste it into the AGENTS.md the
       runtime loads. Operate chat dispatch under the interim cap +
       governor procedure from this point on; the cap stays in force for
@@ -112,10 +112,12 @@ How to interpret the results:
 
 ## 5. Janitor (`governor-janitor`)
 
-- [ ] Prerequisite: the governor build provides `janitor-snapshot`,
-      `admit --block-build`, and `requeue-interrupted`, covered by tests,
-      with the pre-existing suite still green. (The core governor shipped
-      in this skill predates these helpers; the reference deployment added
+- [ ] Prerequisite: the governor build provides `janitor-snapshot`
+      (with `--checkpoints`), `admit --block-build`,
+      `requeue-interrupted`, and `extract-checkpoints`, plus the
+      `tracker_ref` item field, covered by tests, with the pre-existing
+      suite still green. (The governor.py shipped in this skill at
+      v0.2.1 includes these helpers; the reference deployment added
       them Oct 21, 2026.) Do not enable the janitor without them.
 - [ ] Confirm the gate corrections are recorded in the deployment's status
       notes: the §11 replay is **not** a janitor gate (waived by the owner

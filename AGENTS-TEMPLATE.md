@@ -131,6 +131,19 @@ every chat:
   time inside the file and removes it when done. A HOLD older than 3
   hours is stale: any chat may remove it after noting the fact in its
   reply.
+- Worker checkpointing: if the governor item you are running has a
+  `tracker_ref` (its Work Tracker entry id — the enqueueing chat records
+  it with `enqueue --tracker-ref <id>`, or it is set at spawn with
+  `started --tracker-ref <id>`), checkpoint at least every 5 minutes
+  while you work: read the entry on the Work Tracker and update its
+  `details`, preserving the existing text and replacing the checkpoint
+  line — or appending it if none — with
+  `GOVERNOR-CHECKPOINT {"item": "<governor item id>", "ts": <unix epoch seconds>, "state": "<one-line state>"}`.
+  The janitor reads these back every tick; a checkpoint younger than
+  10 minutes is liveness evidence equal to a live worker sighting.
+  Without checkpoints, a run that spends ~60+ minutes in a
+  non-compiling phase can be reaped as stale. Items with no tracker
+  link get no checkpoint protection.
 - Gate status (corrected Oct 21, 2026): the janitor cron
   (`governor-janitor`, every 10 min) runs in self-contained conservative
   mode — it reconciles from the queue log plus /proc evidence, never the

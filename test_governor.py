@@ -32,6 +32,24 @@ class GovernorCase(unittest.TestCase):
         self.dir = tempfile.mkdtemp(prefix="gov-test-")
         shutil.copy(os.path.join(HERE, "limits.yaml"),
                     os.path.join(self.dir, "limits.yaml"))
+        # Fixture pin: the budget/breaker tests were authored against
+        # build 1 / light 4 / total 5 / breaker 12.0 (DESIGN S4;
+        # STATUS.md). The live limits.yaml moved on (build 2 on Oct 20,
+        # 2026; light 9, total 10, breaker 15.0 on Oct 21, 2026), which
+        # silently reddens those tests; the suite tests mechanics
+        # against a fixed budget fixture, so pin the authored values
+        # here. The live limits.yaml itself is never modified.
+        path = os.path.join(self.dir, "limits.yaml")
+        with open(path) as f:
+            text = f.read()
+        for old, new in (("build_slots: 2", "build_slots: 1"),
+                         ("light_slots: 9", "light_slots: 4"),
+                         ("total_workers: 10", "total_workers: 5"),
+                         ("loadavg_threshold: 15.0",
+                          "loadavg_threshold: 12.0")):
+            text = text.replace(old, new)
+        with open(path, "w") as f:
+            f.write(text)
         self.store = gov.Store(self.dir)
 
     def tearDown(self):
@@ -313,6 +331,381 @@ class TestCli(unittest.TestCase):
             r = run("rebuild")
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             self.assertEqual(json.loads(r.stdout)["rebuilt_items"], 1)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+
+class TestJanitorSnapshot(GovernorCase):
+    """The janitor's snapshot is built from state + /proc evidence only.
+    Protection rules (brief, Oct 21 2026): young items always protected;
+    builds protected while any compiler process is alive; explicit
+    liveness evidence protects; otherwise the worker is omitted and the
+    ordinary running-absent TTL applies."""
+
+    def _running(self, title, resource="light", started_at=T0, **kw):
+        iid = self.enqueue(title, resource=resource, now=started_at, **kw)["id"]
+        out = self.admit(now=started_at)
+        self.assertIn(iid, out["admitted"])
+        gov.do_started(self.store, iid, "w-" + iid, now=started_at)
+        return iid
+
+    def _protected_ids(self, snap):
+        return {a["agent_id"] for a in snap["agents"]}
+
+    def test_young_light_worker_protected(self):
+        iid = self._running("young light")
+        snap = gov.build_janitor_snapshot(self.store, now=T0 + 30 * 60)
+        self.assertIn("w-" + iid, self._protected_ids(snap))
+        self.assertEqual(snap["cron_active"], [])
+
+    def test_old_light_worker_unprotected_without_evidence(self):
+        iid = self._running("old light")
+        snap = gov.build_janitor_snapshot(self.store, now=T0 + 61 * 60)
+        self.assertNotIn("w-" + iid, self._protected_ids(snap))
+
+    def test_old_light_worker_protected_by_live_evidence(self):
+        iid = self._running("evidenced light")
+        snap = gov.build_janitor_snapshot(
+            self.store, now=T0 + 61 * 60, live_agent_ids={"w-" + iid})
+        self.assertIn("w-" + iid, self._protected_ids(snap))
+
+    def test_build_protected_while_compiler_alive(self):
+        iid = self._running("old build", resource="build")
+        snap = gov.build_janitor_snapshot(self.store, now=T0 + 180 * 60,
+                                          compiler_alive=True)
+        self.assertIn("w-" + iid, self._protected_ids(snap))
+
+    def test_build_unprotected_when_no_compiler(self):
+        iid = self._running("stale build", resource="build")
+        snap = gov.build_janitor_snapshot(self.store, now=T0 + 180 * 60,
+                                          compiler_alive=False)
+        self.assertNotIn("w-" + iid, self._protected_ids(snap))
+
+    def test_admitted_items_contribute_no_agents(self):
+        iid = self.enqueue("just admitted")["id"]
+        self.admit(now=T0)
+        self.assertEqual(self.items()[iid]["state"], "admitted")
+        snap = gov.build_janitor_snapshot(self.store, now=T0)
+        self.assertEqual(snap["agents"], [])
+
+
+class TestCheckpoints(GovernorCase):
+    """Checkpoint heartbeats (Oct 21, 2026): a worker on a
+    tracker-linked item writes a GOVERNOR-CHECKPOINT line into its
+    Work Tracker entry's details every ~5 minutes. A checkpoint younger
+    than 10 minutes protects the running item in the janitor snapshot
+    exactly like the <60-minute blanket; stale/missing checkpoints,
+    unlinked items, and checkpoints carried by the wrong entry confer
+    nothing."""
+
+    NOW = T0 + 70 * 60  # worker started 70 min ago: past every old rule
+
+    def _details(self, item_id, ts, state="working"):
+        return ('Human notes stay.\nGOVERNOR-CHECKPOINT '
+                '{"item": "%s", "ts": %s, "state": "%s"}'
+                % (item_id, ts, state))
+
+    def _running_old(self, title, tracker_ref=None, resource="light"):
+        iid = self.enqueue(title, resource=resource, now=T0,
+                           tracker_ref=tracker_ref)["id"]
+        self.admit(now=T0)
+        gov.do_started(self.store, iid, "w-" + iid, now=T0)
+        return iid
+
+    def _cps(self, iid, ts, tracker_id=72):
+        return {iid: {"ts": ts, "tracker_id": tracker_id,
+                      "state": "working"}}
+
+    def _protected(self, snap):
+        return {a["agent_id"] for a in snap["agents"]}
+
+    def test_parse_checkpoint_reads_last_marker_line(self):
+        details = (self._details("item-a", T0, "early") + "\n"
+                   + self._details("item-a", T0 + 300, "later"))
+        cp = gov.parse_checkpoint(details)
+        self.assertEqual(cp["item"], "item-a")
+        self.assertEqual(cp["ts"], T0 + 300)
+        self.assertEqual(cp["state"], "later")
+
+    def test_parse_checkpoint_absent_or_malformed(self):
+        self.assertIsNone(gov.parse_checkpoint(None))
+        self.assertIsNone(gov.parse_checkpoint(""))
+        self.assertIsNone(gov.parse_checkpoint("no marker here"))
+        self.assertIsNone(
+            gov.parse_checkpoint("GOVERNOR-CHECKPOINT {not json"))
+        self.assertIsNone(
+            gov.parse_checkpoint('GOVERNOR-CHECKPOINT {"item": "x"}'))
+
+    def test_extract_checkpoints_maps_entries_and_prefers_freshest(self):
+        entries = [
+            {"id": 72, "details": self._details("item-a", T0)},
+            {"id": 73, "details": self._details("item-a", T0 + 240)},
+            {"id": 74, "details": "no checkpoint in this one"},
+            {"id": 75, "details": self._details("item-b", T0 + 60)},
+            "not-a-dict",
+        ]
+        out = gov.extract_checkpoints(entries)
+        self.assertEqual(set(out), {"item-a", "item-b"})
+        self.assertEqual(out["item-a"]["ts"], T0 + 240)
+        self.assertEqual(out["item-a"]["tracker_id"], 73)
+        self.assertEqual(out["item-b"]["tracker_id"], 75)
+
+    def test_fresh_checkpoint_protects_old_worker(self):
+        iid = self._running_old("checkpointed", tracker_ref=72)
+        snap = gov.build_janitor_snapshot(
+            self.store, now=self.NOW,
+            checkpoints=self._cps(iid, self.NOW - 60))
+        self.assertIn("w-" + iid, self._protected(snap))
+
+    def test_stale_checkpoint_confers_nothing(self):
+        iid = self._running_old("stale checkpoint", tracker_ref=72)
+        snap = gov.build_janitor_snapshot(
+            self.store, now=self.NOW,
+            checkpoints=self._cps(iid, self.NOW - 11 * 60))
+        self.assertNotIn("w-" + iid, self._protected(snap))
+
+    def test_checkpoint_requires_matching_tracker_ref(self):
+        iid = self._running_old("wrong entry", tracker_ref=72)
+        snap = gov.build_janitor_snapshot(
+            self.store, now=self.NOW,
+            checkpoints=self._cps(iid, self.NOW - 60, tracker_id=99))
+        self.assertNotIn("w-" + iid, self._protected(snap))
+
+    def test_unlinked_item_gets_no_checkpoint_protection(self):
+        iid = self._running_old("no link")  # tracker_ref None
+        snap = gov.build_janitor_snapshot(
+            self.store, now=self.NOW,
+            checkpoints=self._cps(iid, self.NOW - 60))
+        self.assertNotIn("w-" + iid, self._protected(snap))
+
+    def test_checkpoint_never_protects_terminal_item(self):
+        iid = self._running_old("already done", tracker_ref=72)
+        gov.do_close(self.store, iid, "done", now=T0 + 30 * 60)
+        snap = gov.build_janitor_snapshot(
+            self.store, now=self.NOW,
+            checkpoints=self._cps(iid, self.NOW - 60))
+        self.assertEqual(snap["agents"], [])
+
+    def test_admit_keeps_checkpointed_worker_running(self):
+        iid = self._running_old("long quiet phase", tracker_ref=72)
+        snap = gov.build_janitor_snapshot(
+            self.store, now=self.NOW,
+            checkpoints=self._cps(iid, self.NOW - 120))
+        out = gov.do_admit(self.store, snap, now=self.NOW, load1=1.0)
+        self.assertEqual(out["interrupted"], [])
+        self.assertEqual(self.items()[iid]["state"], "running")
+        # Control: the same worker without checkpoint evidence is
+        # interrupted by the running-absent TTL in the same pass shape.
+        iid2 = self._running_old("no heartbeat", tracker_ref=73)
+        snap2 = gov.build_janitor_snapshot(self.store, now=self.NOW,
+                                           checkpoints={})
+        out2 = gov.do_admit(self.store, snap2, now=self.NOW, load1=1.0)
+        self.assertIn(iid2, out2["interrupted"])
+
+    def test_tracker_ref_recorded_at_enqueue_and_started(self):
+        iid = self.enqueue("linked at enqueue", tracker_ref="72")["id"]
+        self.assertEqual(self.items()[iid]["tracker_ref"], 72)
+        iid2 = self.enqueue("linked at start")["id"]
+        self.assertIsNone(self.items()[iid2]["tracker_ref"])
+        self.admit(now=T0)
+        gov.do_started(self.store, iid2, "w-2", now=T0,
+                       tracker_ref="75")
+        self.assertEqual(self.items()[iid2]["tracker_ref"], 75)
+
+
+class TestCheckpointCli(unittest.TestCase):
+    def test_checkpoint_cli_round_trip(self):
+        d = tempfile.mkdtemp(prefix="gov-checkpoint-cli-")
+        try:
+            shutil.copy(os.path.join(HERE, "limits.yaml"),
+                        os.path.join(d, "limits.yaml"))
+            env = dict(os.environ, GOVERNOR_LOAD1="1.0")
+            script = os.path.join(HERE, "governor.py")
+
+            def run(*argv):
+                return subprocess.run(
+                    [sys.executable, script, "--dir", d] + list(argv),
+                    capture_output=True, text=True, env=env, timeout=30)
+
+            r = run("enqueue", "--title", "checkpoint cli job",
+                    "--tracker-ref", "72")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            iid = json.loads(r.stdout)["id"]
+            r = run("admit")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            r = run("started", "--id", iid, "--worker", "w-cli")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+            details = ('notes\nGOVERNOR-CHECKPOINT {"item": "%s", '
+                       '"ts": %s, "state": "cli demo"}'
+                       % (iid, time.time()))
+            tracker_path = os.path.join(d, "tracker.json")
+            with open(tracker_path, "w") as f:
+                json.dump({"data": {"items": [
+                    {"id": 72, "details": details}]}}, f)
+            cps_path = os.path.join(d, "checkpoints.json")
+            r = run("extract-checkpoints", "--tracker-json", tracker_path,
+                    "--out", cps_path)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(json.loads(r.stdout)["count"], 1)
+            r = run("janitor-snapshot", "--checkpoints", cps_path)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            diag = json.loads(r.stdout)
+            self.assertEqual(diag["checkpoint_protected"], [iid])
+            self.assertIn({"agent_id": "w-cli", "status": "running"},
+                          diag["snapshot"]["agents"])
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+
+class TestBlockResources(GovernorCase):
+    def test_block_build_admits_light_only(self):
+        b = self.enqueue("blocked build", resource="build")["id"]
+        l = self.enqueue("free light")["id"]
+        out = gov.do_admit(self.store, EMPTY, now=T0, load1=1.0,
+                           block_resources=frozenset(["build"]))
+        self.assertEqual(out["admitted"], [l])
+        self.assertEqual(out["blocked_resources"], ["build"])
+        self.assertEqual(self.items()[b]["state"], "queued")
+        out2 = self.admit(now=T0 + 1)  # unblocked pass admits the build
+        self.assertEqual(out2["admitted"], [b])
+
+
+class TestCompilerScan(unittest.TestCase):
+    def test_scan_reads_comm_names_from_proc_root(self):
+        d = tempfile.mkdtemp(prefix="gov-proc-")
+        try:
+            for pid, comm in ((123, "rustc"), (456, "bash"),
+                              (789, "clippy-driver"), (999, None)):
+                os.mkdir(os.path.join(d, str(pid)))
+                if comm is not None:
+                    with open(os.path.join(d, str(pid), "comm"), "w") as f:
+                        f.write(comm + "\n")
+            os.mkdir(os.path.join(d, "self"))  # non-numeric entry ignored
+            found = gov.scan_compiler_processes(d)
+            self.assertEqual({p["comm"] for p in found},
+                             {"rustc", "clippy-driver"})
+            self.assertEqual({p["pid"] for p in found}, {123, 789})
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_scan_missing_root_returns_empty(self):
+        self.assertEqual(gov.scan_compiler_processes("/nonexistent-proc"),
+                         [])
+
+
+class TestRequeueInterrupted(GovernorCase):
+    def _interrupted(self, title, start_at=T0):
+        iid = self.enqueue(title, now=start_at)["id"]
+        self.admit(now=start_at)
+        gov.do_started(self.store, iid, "w-" + iid, now=start_at)
+        out = self.admit(now=start_at + 11 * 60)  # absent past TTL
+        self.assertEqual(out["interrupted"], [iid])
+        return iid
+
+    def test_interrupted_below_attempt_cap_requeues(self):
+        iid = self._interrupted("flaky once")  # attempts == 1
+        out = gov.do_requeue_interrupted(self.store, now=T0 + 12 * 60)
+        self.assertEqual(out["requeued"], [iid])
+        self.assertEqual(out["failed"], [])
+        item = self.items()[iid]
+        self.assertEqual(item["state"], "queued")
+        self.assertIsNone(item["worker_agent_id"])
+        self.assertIsNone(item["started_at"])
+
+    def test_interrupted_at_attempt_cap_fails(self):
+        iid = self._interrupted("flaky twice")          # attempts 1
+        gov.do_requeue_interrupted(self.store, now=T0 + 12 * 60)
+        self.admit(now=T0 + 13 * 60)                    # attempts 2
+        gov.do_started(self.store, iid, "w-again", now=T0 + 13 * 60)
+        out = self.admit(now=T0 + 24 * 60)
+        self.assertEqual(out["interrupted"], [iid])
+        out = gov.do_requeue_interrupted(self.store, now=T0 + 25 * 60)
+        self.assertEqual(out["requeued"], [])
+        self.assertEqual(out["failed"], [iid])
+        item = self.items()[iid]
+        self.assertEqual(item["state"], "failed")
+        self.assertIn("max attempts", item["last_error"])
+
+    def test_other_states_untouched(self):
+        done_id = self.enqueue("finisher")["id"]
+        self.admit(now=T0)
+        gov.do_started(self.store, done_id, "w-done", now=T0)
+        gov.do_close(self.store, done_id, "done", now=T0 + 1)
+        queued_id = self.enqueue("still waiting", now=T0 + 2)["id"]
+        out = gov.do_requeue_interrupted(self.store, now=T0 + 3)
+        self.assertEqual(out, {"requeued": [], "failed": []})
+        self.assertEqual(self.items()[done_id]["state"], "done")
+        self.assertEqual(self.items()[queued_id]["state"], "queued")
+
+
+class TestJanitorFlow(GovernorCase):
+    """End-to-end conservative behavior: a 16-hour phantom is reconciled
+    and requeued by a janitor pass, while a young chat-owned worker and
+    a compiler-backed build are left strictly alone."""
+
+    def test_phantom_reaped_young_and_build_protected(self):
+        phantom = self.enqueue("phantom light", now=T0)["id"]
+        self.admit(now=T0)
+        gov.do_started(self.store, phantom, "w-phantom", now=T0)
+        t1 = T0 + 16 * 3600
+        young = self.enqueue("young light", now=t1 - 300)["id"]
+        build = self.enqueue("live build", resource="build",
+                             now=t1 - 300)["id"]
+        out = self.admit(now=t1 - 300)
+        self.assertIn(young, out["admitted"])
+        self.assertIn(build, out["admitted"])
+        gov.do_started(self.store, young, "w-young", now=t1 - 300)
+        gov.do_started(self.store, build, "w-build", now=t1 - 300)
+        # The phantom is already interrupted by the empty-snapshot pass
+        # above (any pass reconciles it); the janitor's contribution is
+        # the snapshot that protects the live workers plus the requeue.
+        self.assertEqual(self.items()[phantom]["state"], "interrupted")
+        snap = gov.build_janitor_snapshot(self.store, now=t1,
+                                          compiler_alive=True)
+        protected = {a["agent_id"] for a in snap["agents"]}
+        self.assertEqual(protected, {"w-young", "w-build"})
+        out = gov.do_admit(self.store, snap, now=t1, load1=1.0)
+        self.assertEqual(out["interrupted"], [])
+        self.assertEqual(self.items()[young]["state"], "running")
+        self.assertEqual(self.items()[build]["state"], "running")
+        out = gov.do_requeue_interrupted(self.store, now=t1)
+        self.assertEqual(out["requeued"], [phantom])
+        self.assertEqual(self.items()[phantom]["state"], "queued")
+
+
+class TestJanitorCli(unittest.TestCase):
+    def test_janitor_cli_round_trip(self):
+        d = tempfile.mkdtemp(prefix="gov-janitor-cli-")
+        try:
+            shutil.copy(os.path.join(HERE, "limits.yaml"),
+                        os.path.join(d, "limits.yaml"))
+            env = dict(os.environ, GOVERNOR_LOAD1="1.0")
+            script = os.path.join(HERE, "governor.py")
+
+            def run(*argv):
+                return subprocess.run(
+                    [sys.executable, script, "--dir", d] + list(argv),
+                    capture_output=True, text=True, env=env, timeout=30)
+
+            r = run("enqueue", "--title", "janitor cli job")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            snap_path = os.path.join(d, "janitor-snap.json")
+            r = run("janitor-snapshot", "--out", snap_path)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            diag = json.loads(r.stdout)
+            self.assertIn("unexplained_compilers", diag)
+            with open(snap_path) as f:
+                snap = json.load(f)
+            self.assertEqual(snap["cron_active"], [])
+            r = run("admit", "--snapshot", snap_path, "--block-build")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(json.loads(r.stdout)["blocked_resources"],
+                             ["build"])
+            r = run("requeue-interrupted")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(json.loads(r.stdout),
+                             {"requeued": [], "failed": []})
         finally:
             shutil.rmtree(d, ignore_errors=True)
 

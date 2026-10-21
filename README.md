@@ -65,7 +65,7 @@ built from that incident.
    2 vCPU / 7 GB VM where one build already saturates both cores.
    Measure your host first — vCPUs, RAM, one real build's peak — and
    scale by the arithmetic in the template's comments, not by preference.
-4. Verify: `python3 -m unittest test_governor` (21 tests) and
+4. Verify: `python3 -m unittest test_governor` (46 tests) and
    `python3 governor.py status`.
 5. Paste the filled-in section from `AGENTS-TEMPLATE.md` into the
    AGENTS.md your agent runtime loads. That template carries the dispatch
@@ -95,11 +95,14 @@ superseded:
   `governor-janitor` cron (every 10 minutes) reconciles from the queue
   log and /proc evidence, requeues interrupted items under the attempt
   cap, and admits/spawns at most 2 items per tick under the HOLD file,
-  the load breaker, slot limits, and an unexplained-compiler guard. One
-  wart: `governor.py status` still prints "janitor cron NOT active" —
-  that line reads the `gates.janitor_cron_active` flag in limits.yaml,
-  and the janitor build was not permitted to change limits values. The
-  cron definition and AGENTS.md are the accurate sources for activation.
+  the load breaker, slot limits, and an unexplained-compiler guard.
+  Workers on tracker-linked items also write checkpoint heartbeats
+  into their Work Tracker entries every ~5 minutes; a checkpoint
+  younger than 10 minutes protects a running item like a live
+  sighting. (The `gates.janitor_cron_active` flag in limits.yaml
+  lagged activation briefly — the janitor build could not change
+  limits values; it was flipped in a separate change and the status
+  line now reads ACTIVE.)
 - **Interim cap: still in force** for chat dispatch. The cap and the
   governor procedure apply together, stricter limit winning; enabling
   the janitor did not retire it.
@@ -121,7 +124,7 @@ this README.
 | `templates/install-checklist.md` | The combined install checklist (governor → tracker → refill → janitor). |
 | `VERSION` | Skill version. |
 | `governor.py` | The reference implementation. |
-| `test_governor.py` | 21 tests covering budgets, promotion order, aging, fan-out, reservations, the breaker, locking, and the CLI. |
+| `test_governor.py` | 46 tests covering budgets, promotion order, aging, fan-out, reservations, the breaker, locking, the janitor snapshot, checkpoint heartbeats, and the CLI. |
 | `limits.yaml` | Template limits with tuning guidance. |
 | `DESIGN.md` | The design and decision record, including the council-modifications addendum. |
 | `REPLAY.md` | The load-replay validation procedure. |

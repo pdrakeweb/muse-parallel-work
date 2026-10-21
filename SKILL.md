@@ -1,6 +1,6 @@
 ---
 name: "muse-parallel-work"
-version: "0.2.0"
+version: "0.2.1"
 license: MIT
 description: >
   Manage parallel sub-agent work on a shared machine so batch work never
@@ -18,6 +18,13 @@ description: >
   a self-contained janitor cron that reconciles from queue state and
   /proc evidence instead of worker-list visibility, and the
   admission/control cron inventory, including the HOLD protocol.
+  Version 0.2.1 adds worker checkpoint heartbeats: a worker on a
+  tracker-linked governor item writes a GOVERNOR-CHECKPOINT line into
+  its Work Tracker entry at least every 5 minutes, and the janitor
+  honors a checkpoint younger than 10 minutes as liveness evidence
+  equal to a live worker sighting — so a run in a long non-compiling
+  phase is no longer indistinguishable from a dead one. The shipped
+  governor.py and test suite are updated to match (46 tests).
   Includes the AGENTS.md template that teaches agents the rules, plus a
   templates pack (janitor cron body, refill cron body, install
   checklist).
@@ -326,20 +333,19 @@ Version 0.1.0 recorded both janitor activation gates as CLOSED. That is
 no longer the state of the reference deployment, and the record is
 corrected here rather than left standing:
 
-| Gate | Status at v0.2.0 | What changed |
+| Gate | Status at v0.2.1 | What changed |
 |---|---|---|
 | §11 load replay (`REPLAY.md`) | **Waived as a janitor gate** by the deployment's owner, Oct 21, 2026 | The replay remains a useful validation procedure for a quiet host. It is not a prerequisite for the janitor, and it was never run as a gate. |
 | Cron-session visibility smoke test | **Failed, and superseded** | Failed Oct 19, 2026 and twice more on Oct 21, 2026 (evidence below). The original janitor design reconciled from the platform's worker listing; the self-contained janitor (Mechanism 4) removes that dependency. The gate's purpose — never over-admit while blind — is preserved by the janitor's conservative rules, not by the test. |
 | Interim concurrency cap | **Still in force** for chat dispatch | Enabling the janitor did not retire it. Cap and governor apply together; the stricter limit wins. |
 | Janitor | **Active in self-contained conservative mode** in the reference deployment | The `governor-janitor` cron (every 10 min) was created and enabled Oct 21, 2026, with its governor helpers (`janitor-snapshot`, `admit --block-build`, `requeue-interrupted`) implemented and tested in the live workstream. |
 
-One wart to know when reading `governor.py status` in the reference
-deployment: its gates line still prints "janitor cron NOT active",
-because that line reads the `gates.janitor_cron_active` flag in
-`limits.yaml`, and the janitor build was not permitted to change limits
-values. The cron definition and AGENTS.md are the accurate sources for
-janitor activation; the status line is stale until the flag is updated
-in a separate, permitted change.
+A wart that has since closed: `governor.py status` reads its gates line
+from the `gates.janitor_cron_active` flag in `limits.yaml`, which the
+janitor build was not permitted to change, so the line printed "janitor
+cron NOT active" after activation. The flag was flipped to `true` in a
+separate permitted change later on Oct 21, 2026, and the gates line now
+correctly reads "janitor cron ACTIVE".
 
 ## Mechanism 3 — the backlog: the Work Tracker and the refill cron
 
@@ -553,7 +559,9 @@ nothing**.
     `rustc`, or `clippy-driver` process lives, because /proc evidence
     cannot attribute a compiler process to one item, so every build is
     protected;
-  - explicit liveness evidence for its worker id is supplied.
+  - explicit liveness evidence for its worker id is supplied;
+  - its linked Work Tracker entry carries a **checkpoint younger than
+    10 minutes** — see "Checkpoint heartbeats" below.
 - An unprotected running worker is omitted from the snapshot, and the
   ordinary reconcile rule decides: absent past the running-absent TTL
   (`running_absent_minutes`; 10 in the template) the item is marked
@@ -566,6 +574,44 @@ nothing**.
   kill: it frees the governor's slot accounting and requeues the item;
   a worker that was actually still alive keeps running, and its result
   still returns to its owner.
+
+### Checkpoint heartbeats
+
+Age and compiler evidence cannot distinguish a worker in a long
+non-compiling phase from a dead one — in the reference deployment, two
+genuinely running builds were reaped on Oct 21, 2026 after crossing 60
+minutes with no compiler process alive, and two other items burned
+their attempt cap through interrupted cycles. The fix is a
+worker-maintained heartbeat in the Work Tracker (Mechanism 3):
+
+- **The link.** A governor item may carry `tracker_ref` — the id of its
+  Work Tracker entry — recorded with `enqueue --tracker-ref <id>` or at
+  spawn time with `started --tracker-ref <id>`. Items without a link
+  get no checkpoint protection.
+- **The write.** While the item runs, its worker updates the entry's
+  `details` (the tracker's update action) at least every 5 minutes,
+  preserving the existing text and replacing the heartbeat line — a
+  single line, conventionally the last line of `details`:
+  `GOVERNOR-CHECKPOINT {"item": "<governor item id>", "ts": <unix epoch seconds>, "state": "<one-line state>"}`
+- **The read.** Each janitor tick, when any running item is
+  tracker-linked, the janitor reads the tracker entries back (the list
+  action — an ordinary agent tool, available in cron lineage, unlike
+  the worker listing), extracts the heartbeats with
+  `extract-checkpoints`, and passes them to the snapshot
+  (`janitor-snapshot --checkpoints <file>`). A checkpoint younger than
+  10 minutes (with a 60-second tolerance for future clock skew)
+  protects the item exactly like the <60-minute blanket, past every
+  age/compiler evidence limit.
+- **Binding rules.** A checkpoint carried by any entry other than the
+  item's linked entry confers nothing; a stale (>10 min) or missing
+  checkpoint confers nothing; and because the snapshot only ever lists
+  running items, a checkpoint can never protect a terminal item or
+  block a close-out.
+- **The convention is part of the contract.** The AGENTS.md template
+  carries the worker-side rule, and briefs for long-running
+  tracker-linked items repeat it. A worker that never checkpoints is
+  indistinguishable from a dead one once the evidence windows close —
+  by design.
 
 ### Conservative admission
 
@@ -612,13 +658,15 @@ The janitor never enqueues new work, never edits `queue.jsonl` or
 
 ### Implementation prerequisite
 
-The janitor depends on three governor commands — `janitor-snapshot`,
-`admit --block-build`, and `requeue-interrupted`. The core `governor.py`
-shipped in this skill predates them; the reference deployment added
-them on Oct 21, 2026 with unit tests (snapshot protection rules, the
+The janitor depends on four governor commands — `janitor-snapshot`
+(with `--checkpoints`), `admit --block-build`, `requeue-interrupted`,
+and `extract-checkpoints` — plus the `tracker_ref` item field. The
+`governor.py` shipped in this skill (v0.2.1) includes all of them,
+with unit tests (snapshot protection rules including checkpoints, the
 block-build pass, the /proc compiler scan, interrupted requeue under
-the attempt cap, and an end-to-end phantom-reaping flow). Port that
-behavior, with tests, before enabling the janitor cron from
+the attempt cap, and an end-to-end phantom-reaping flow). If you port
+the governor instead of adopting the shipped file, port that behavior,
+with tests, before enabling the janitor cron from
 `templates/janitor-cron-body.md` — the checklist
 (`templates/install-checklist.md`) makes it a gate.
 
@@ -698,7 +746,7 @@ The full sequence, with verification at each step, is
    `metrics.jsonl` on first use.
 3. Tune `limits.yaml` per the procedure above.
 4. Verify: `cd <governor-dir> && python3 -m unittest test_governor`
-   (21 tests) and `python3 governor.py status`.
+   (46 tests) and `python3 governor.py status`.
 5. Paste the filled-in `AGENTS-TEMPLATE.md` section into your AGENTS.md.
    Operate under the interim cap + governor procedure together from here
    on; the cap remains in force for chat dispatch through every later
@@ -722,7 +770,7 @@ The full sequence, with verification at each step, is
 | `AGENTS-TEMPLATE.md` | The AGENTS.md section to paste into your runtime's instructions. |
 | `README.md` | Human-facing summary: what it is, the incident, install, gate status. |
 | `governor.py` | The reference implementation (stdlib-only Python 3). |
-| `test_governor.py` | 21-test unittest suite for governor.py. |
+| `test_governor.py` | 46-test unittest suite for governor.py. |
 | `limits.yaml` | Template limits with tuning guidance. |
 | `DESIGN.md` | The full design and decision record, incl. the council-modifications addendum and the v0.2.0 status correction. |
 | `REPLAY.md` | The §11 validation procedure (optional validation since Oct 21, 2026; not an activation gate). |
