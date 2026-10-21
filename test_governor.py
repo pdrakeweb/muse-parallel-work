@@ -816,5 +816,226 @@ class TestJanitorCli(unittest.TestCase):
             shutil.rmtree(d, ignore_errors=True)
 
 
+class TestCheckpointParserTolerance(GovernorCase):
+    """Parser tolerance (hardening, Oct 21, 2026): the marker is found
+    ANYWHERE in the details text, not only at line start — a worker
+    buried the marker mid-paragraph and line-start-only parsing
+    silently missed it. Binding rules are unchanged."""
+
+    def _cp(self, item_id, ts, state="working"):
+        return ('GOVERNOR-CHECKPOINT {"item": "%s", "ts": %s, '
+                '"state": "%s"}' % (item_id, ts, state))
+
+    def test_embedded_mid_paragraph_parses(self):
+        details = ("The worker is mid-way through the gates run and "
+                   + self._cp("item-a", T0, "gates running")
+                   + " with more prose after it.\nA second paragraph.")
+        cp = gov.parse_checkpoint(details)
+        self.assertIsNotNone(cp)
+        self.assertEqual(cp["item"], "item-a")
+        self.assertEqual(cp["ts"], T0)
+        self.assertEqual(cp["state"], "gates running")
+
+    def test_last_occurrence_wins_mixed_positions(self):
+        line_start_old = self._cp("item-a", T0, "old") + "\n"
+        embedded_new = ("prose " + self._cp("item-a", T0 + 300, "new")
+                        + " more prose")
+        cp = gov.parse_checkpoint(line_start_old + embedded_new)
+        self.assertEqual(cp["ts"], T0 + 300)
+        self.assertEqual(cp["state"], "new")
+        # And the reverse layout: embedded older, line-start newer.
+        embedded_old = "prose " + self._cp("item-a", T0, "old") + "\n"
+        line_start_new = self._cp("item-a", T0 + 300, "new")
+        cp = gov.parse_checkpoint(embedded_old + line_start_new)
+        self.assertEqual(cp["ts"], T0 + 300)
+        self.assertEqual(cp["state"], "new")
+
+    def test_malformed_json_after_embedded_marker_ignored(self):
+        self.assertIsNone(gov.parse_checkpoint(
+            "prose GOVERNOR-CHECKPOINT {not json at all"))
+        # A malformed LAST marker does not hide an earlier valid one.
+        details = (self._cp("item-a", T0, "good")
+                   + "\nprose GOVERNOR-CHECKPOINT {broken")
+        cp = gov.parse_checkpoint(details)
+        self.assertEqual(cp["state"], "good")
+
+
+class TestCheckpointLine(GovernorCase):
+    """Helper command (hardening, Oct 21, 2026): the checkpoint line's
+    item id and timestamp are machine-derived — workers append the
+    printed line verbatim and never hand-write either."""
+
+    NOW = T0 + 70 * 60
+
+    def _running_linked(self, title, tracker_ref=72):
+        iid = self.enqueue(title, now=T0, tracker_ref=tracker_ref)["id"]
+        self.admit(now=T0)
+        gov.do_started(self.store, iid, "w-" + iid, now=T0)
+        return iid
+
+    def test_line_for_linked_item_round_trips_and_binds(self):
+        iid = self._running_linked("generates a line")
+        line = gov.do_checkpoint_line(self.store, iid, "gates running",
+                                      now=self.NOW)
+        self.assertTrue(line.startswith(gov.CHECKPOINT_MARKER + " "))
+        self.assertEqual(line.count("\n"), 0)
+        cp = gov.parse_checkpoint("human notes\n" + line)
+        self.assertEqual(cp["item"], iid)
+        self.assertEqual(cp["ts"], self.NOW)
+        self.assertEqual(cp["state"], "gates running")
+        item = self.items()[iid]
+        cps = {iid: {"ts": cp["ts"], "tracker_id": 72,
+                     "state": cp["state"]}}
+        self.assertTrue(gov._checkpoint_fresh(item, cps, self.NOW + 30))
+
+    def test_state_with_quotes_and_unicode_survives(self):
+        iid = self._running_linked("tricky state")
+        state = 'fixing "quoted" bits — ünïcode ✓ and \\backslash'
+        line = gov.do_checkpoint_line(self.store, iid, state, now=self.NOW)
+        cp = gov.parse_checkpoint(line)
+        self.assertEqual(cp["state"], state)
+
+    def test_refused_for_unknown_item(self):
+        with self.assertRaises(gov.GovernorError):
+            gov.do_checkpoint_line(self.store, "no-such-item", "x",
+                                   now=self.NOW)
+
+    def test_refused_for_unlinked_item(self):
+        iid = self.enqueue("no tracker link", now=T0)["id"]
+        with self.assertRaises(gov.GovernorError) as ctx:
+            gov.do_checkpoint_line(self.store, iid, "x", now=self.NOW)
+        self.assertIn("tracker_ref", str(ctx.exception))
+
+    def test_refused_for_terminal_items(self):
+        iid = self._running_linked("will finish")
+        gov.do_close(self.store, iid, "done", now=T0 + 10)
+        with self.assertRaises(gov.GovernorError):
+            gov.do_checkpoint_line(self.store, iid, "x", now=self.NOW)
+        iid2 = self._running_linked("will fail", tracker_ref=73)
+        gov.do_close(self.store, iid2, "failed", error="boom",
+                     now=T0 + 10)
+        with self.assertRaises(gov.GovernorError):
+            gov.do_checkpoint_line(self.store, iid2, "x", now=self.NOW)
+
+    def test_queued_linked_item_can_generate(self):
+        # A worker checkpointing before its first admit window still
+        # gets a line; only unknown/unlinked/terminal are refused.
+        iid = self.enqueue("queued but linked", now=T0,
+                           tracker_ref=72)["id"]
+        line = gov.do_checkpoint_line(self.store, iid, "starting",
+                                      now=self.NOW)
+        self.assertEqual(gov.parse_checkpoint(line)["item"], iid)
+
+
+class TestCheckpointLineCli(unittest.TestCase):
+    def test_checkpoint_line_cli(self):
+        d = tempfile.mkdtemp(prefix="gov-cpline-cli-")
+        try:
+            shutil.copy(os.path.join(HERE, "limits.yaml"),
+                        os.path.join(d, "limits.yaml"))
+            env = dict(os.environ, GOVERNOR_LOAD1="1.0")
+            script = os.path.join(HERE, "governor.py")
+
+            def run(*argv):
+                return subprocess.run(
+                    [sys.executable, script, "--dir", d] + list(argv),
+                    capture_output=True, text=True, env=env, timeout=30)
+
+            r = run("enqueue", "--title", "linked job",
+                    "--tracker-ref", "72")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            iid = json.loads(r.stdout)["id"]
+            before = time.time()
+            r = run("checkpoint-line", "--id", iid, "--state",
+                    "cli state")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            line = r.stdout.strip()
+            cp = gov.parse_checkpoint(line)
+            self.assertEqual(cp["item"], iid)
+            self.assertEqual(cp["state"], "cli state")
+            self.assertGreaterEqual(cp["ts"], before - 1)
+            self.assertLessEqual(cp["ts"], time.time() + 1)
+            r = run("enqueue", "--title", "unlinked job")
+            iid2 = json.loads(r.stdout)["id"]
+            r = run("checkpoint-line", "--id", iid2, "--state", "x")
+            self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+            self.assertIn("tracker_ref",
+                          json.loads(r.stdout)["detail"])
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+
+class TestMalformedCheckpoints(GovernorCase):
+    """Malformation visibility (hardening, Oct 21, 2026): a running,
+    tracker-linked item whose linked entry CONTAINS the marker but
+    yields no valid bound checkpoint is flagged — unparseable, wrong
+    item name, or absurd timestamp. No marker at all is the ordinary
+    stale case and is NOT flagged."""
+
+    NOW = T0 + 70 * 60
+    YEAR = 365 * 24 * 3600
+
+    def _running_linked(self, title, tracker_ref):
+        iid = self.enqueue(title, now=T0, tracker_ref=tracker_ref)["id"]
+        self.admit(now=T0)
+        gov.do_started(self.store, iid, "w-" + iid, now=T0)
+        return iid
+
+    def _details(self, item_id, ts, state="working"):
+        return ('notes\nGOVERNOR-CHECKPOINT {"item": "%s", "ts": %s, '
+                '"state": "%s"}' % (item_id, ts, state))
+
+    def _malformed(self, entries):
+        return gov.find_malformed_checkpoints(self.store, entries,
+                                              now=self.NOW)
+
+    def test_wrong_item_marker_flagged(self):
+        iid = self._running_linked("wrong name", 72)
+        entries = [{"id": 72,
+                    "details": self._details("some-other-item",
+                                             self.NOW - 60)}]
+        self.assertEqual(self._malformed(entries), [iid])
+
+    def test_year_stale_ts_flagged(self):
+        iid = self._running_linked("year stale", 72)
+        entries = [{"id": 72,
+                    "details": self._details(iid, self.NOW - self.YEAR)}]
+        self.assertEqual(self._malformed(entries), [iid])
+
+    def test_unparseable_marker_flagged(self):
+        iid = self._running_linked("broken json", 72)
+        entries = [{"id": 72,
+                    "details": "notes GOVERNOR-CHECKPOINT {oops"}]
+        self.assertEqual(self._malformed(entries), [iid])
+
+    def test_wellformed_fresh_not_flagged(self):
+        iid = self._running_linked("healthy", 72)
+        entries = [{"id": 72,
+                    "details": self._details(iid, self.NOW - 60)}]
+        self.assertEqual(self._malformed(entries), [])
+
+    def test_no_marker_not_flagged(self):
+        self._running_linked("never checkpointed", 72)
+        entries = [{"id": 72, "details": "plain human notes only"}]
+        self.assertEqual(self._malformed(entries), [])
+
+    def test_marker_in_wrong_entry_not_flagged_for_this_item(self):
+        # The marker sits in some OTHER entry; this item's linked
+        # entry carries none — ordinary absence, not malformation.
+        iid = self._running_linked("clean link", 72)
+        entries = [{"id": 72, "details": "nothing here"},
+                   {"id": 99,
+                    "details": self._details(iid, self.NOW - 60)}]
+        self.assertEqual(self._malformed(entries), [])
+
+    def test_queued_item_not_examined(self):
+        iid = self.enqueue("queued with bad entry", now=T0,
+                           tracker_ref=72)["id"]
+        entries = [{"id": 72,
+                    "details": self._details("some-other-item",
+                                             self.NOW - 60)}]
+        self.assertEqual(self._malformed(entries), [])
+
+
 if __name__ == "__main__":
     unittest.main()

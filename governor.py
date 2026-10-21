@@ -23,10 +23,16 @@ build item explains (`admit --block-build`).
 
 Workers on tracker-linked items (item field `tracker_ref`, the Work
 Tracker entry id) also write GOVERNOR-CHECKPOINT heartbeats into that
-entry's details at least every 5 minutes. The janitor reads the tracker
-entries back, extracts the checkpoints (`extract-checkpoints`), and
-passes them to the snapshot: a checkpoint younger than 10 minutes
-protects its item exactly like a live sighting.
+entry's details at least every 5 minutes. Workers never hand-author
+the line: `checkpoint-line` generates it (the item id and timestamp
+are machine-derived — hand-written lines got all three wrong on
+Oct 21, 2026). The janitor reads the tracker entries back, extracts
+the checkpoints (`extract-checkpoints`), and passes them to the
+snapshot: a checkpoint younger than 10 minutes protects its item
+exactly like a live sighting. A linked entry that contains the marker
+but yields no valid bound checkpoint is reported as malformed
+(`checkpoint_malformed` in `janitor-snapshot` diagnostics) instead of
+failing silently.
 """
 import argparse
 import json
@@ -370,26 +376,35 @@ def _norm_tracker_ref(ref):
 
 def parse_checkpoint(details):
     """Extract the last GOVERNOR-CHECKPOINT heartbeat from a Work
-    Tracker entry's details text. Format (a single line, conventionally
-    the last line of details):
+    Tracker entry's details text. Format (conventionally the last line
+    of details):
       GOVERNOR-CHECKPOINT {"item": "<governor item id>",
                             "ts": <epoch seconds>,
                             "state": "<one-line state>"}
-    Returns {"item", "ts", "state"} or None when absent/malformed."""
+    The marker is found ANYWHERE in the text, not only at line start
+    (hardening, Oct 21, 2026: a worker buried the marker mid-paragraph
+    and line-start-only parsing silently missed it). The last marker
+    occurrence whose following JSON parses wins; a marker followed by
+    malformed JSON is ignored. Returns {"item", "ts", "state"} or
+    None when absent/malformed."""
     if not details:
         return None
-    found = None
-    for line in str(details).splitlines():
-        line = line.strip()
-        if not line.startswith(CHECKPOINT_MARKER):
-            continue
+    text = str(details)
+    starts = []
+    idx = text.find(CHECKPOINT_MARKER)
+    while idx != -1:
+        starts.append(idx)
+        idx = text.find(CHECKPOINT_MARKER, idx + len(CHECKPOINT_MARKER))
+    decoder = json.JSONDecoder()
+    for start in reversed(starts):
+        rest = text[start + len(CHECKPOINT_MARKER):].lstrip()
         try:
-            data = json.loads(line[len(CHECKPOINT_MARKER):].strip())
-            found = {"item": str(data["item"]), "ts": float(data["ts"]),
-                     "state": str(data.get("state", ""))}
+            data, _end = decoder.raw_decode(rest)
+            return {"item": str(data["item"]), "ts": float(data["ts"]),
+                    "state": str(data.get("state", ""))}
         except Exception:
             continue
-    return found
+    return None
 
 
 def extract_checkpoints(tracker_items):
@@ -433,6 +448,40 @@ def _checkpoint_fresh(item, checkpoints, now):
     except (TypeError, ValueError):
         return False
     return -CHECKPOINT_SKEW_SECONDS <= age < CHECKPOINT_FRESH_MINUTES * 60
+
+
+def find_malformed_checkpoints(store, tracker_items, now=None):
+    """Silent-failure visibility (hardening, Oct 21, 2026): the ids of
+    running, tracker-linked items whose LINKED entry contains the
+    checkpoint marker but yields no valid bound checkpoint for the
+    item — unparseable JSON after the marker, a checkpoint naming a
+    different item, or a timestamp outside the freshness window (the
+    observed live case was exactly one year stale). An entry with NO
+    marker at all is not malformation: absence is the ordinary stale
+    case and confers nothing, silently by design. Only running items
+    are examined; a terminal item's entry is never read."""
+    now = time.time() if now is None else now
+    by_id = {}
+    for entry in tracker_items or []:
+        if isinstance(entry, dict) and entry.get("id") is not None:
+            by_id[str(entry["id"])] = entry
+    checkpoints = extract_checkpoints(tracker_items)
+    malformed = []
+    for it in store.state["items"].values():
+        if it["state"] != "running":
+            continue
+        ref = it.get("tracker_ref")
+        if ref is None:
+            continue
+        entry = by_id.get(str(ref))
+        if entry is None:
+            continue
+        details = entry.get("details")
+        if not details or CHECKPOINT_MARKER not in str(details):
+            continue
+        if not _checkpoint_fresh(it, checkpoints, now):
+            malformed.append(it["id"])
+    return sorted(malformed)
 
 
 def scan_compiler_processes(proc_root="/proc"):
@@ -801,6 +850,34 @@ def do_set_tracker_ref(store, item_id, tracker_ref, now=None):
         store.release_lock()
 
 
+def do_checkpoint_line(store, item_id, state, now=None):
+    """Generate the fully-formed GOVERNOR-CHECKPOINT line for an item
+    (hardening, Oct 21, 2026). The worker's side of the checkpoint
+    convention is reduced to copy-and-append: the item id comes from
+    the item's own record and `ts` from the system clock here, so a
+    worker can no longer hand-type a wrong id, bury the format by
+    hand, or compute a stale timestamp — the three failure modes
+    observed live on Oct 21, 2026. Refuses unknown items, terminal
+    items (their checkpoints could never be read), and items with no
+    tracker_ref (no entry exists to carry the line). Read-only: no
+    event is emitted and no state changes."""
+    now = time.time() if now is None else now
+    it = store.state["items"].get(item_id)
+    if it is None:
+        raise GovernorError("unknown item %s" % item_id)
+    if it["state"] in TERMINAL:
+        raise GovernorError(
+            "item %s is %s; checkpoints are only for live items"
+            % (item_id, it["state"]))
+    if it.get("tracker_ref") is None:
+        raise GovernorError(
+            "item %s has no tracker_ref; link it first "
+            "(enqueue/started --tracker-ref, or set-tracker-ref)"
+            % item_id)
+    payload = {"item": item_id, "ts": int(now), "state": str(state)}
+    return "%s %s" % (CHECKPOINT_MARKER, json.dumps(payload))
+
+
 def do_close(store, item_id, outcome, error=None, now=None):
     now = time.time() if now is None else now
     store.acquire_lock()
@@ -902,6 +979,16 @@ def _load_snapshot(path):
     return data
 
 
+def _load_tracker_entries(path):
+    """Unwrap a Work Tracker listitems result file (or a bare items
+    list) into the entry dicts extract_checkpoints consumes."""
+    with open(path) as f:
+        raw = json.load(f)
+    if isinstance(raw, dict):
+        return (raw.get("data") or {}).get("items") or raw.get("items") or []
+    return raw
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="governor.py",
                                  description="Parallelism governor (DESIGN.md)")
@@ -937,6 +1024,19 @@ def main(argv=None):
                    help="JSON file of extracted checkpoints (output of "
                         "extract-checkpoints); fresh checkpoints protect "
                         "their running items")
+    p.add_argument("--tracker-json",
+                   help="file holding the Work Tracker listitems result "
+                        "JSON (or a bare items list); when given, the "
+                        "diagnostics also report checkpoint_malformed: "
+                        "running tracker-linked items whose linked entry "
+                        "carries the marker but no valid bound checkpoint")
+
+    p = sub.add_parser("checkpoint-line")
+    p.add_argument("--id", required=True)
+    p.add_argument("--state", required=True,
+                   help="one-line state text for the checkpoint; the "
+                        "item id and timestamp are generated, never "
+                        "supplied by the caller")
 
     p = sub.add_parser("extract-checkpoints")
     p.add_argument("--tracker-json", required=True,
@@ -1012,20 +1112,22 @@ def main(argv=None):
                 it["id"] for it in store.state["items"].values()
                 if it["state"] == "running"
                 and _checkpoint_fresh(it, checkpoints, time.time()))
+            malformed = []
+            if args.tracker_json:
+                malformed = find_malformed_checkpoints(
+                    store, _load_tracker_entries(args.tracker_json))
             print(json.dumps({
                 "snapshot": snap,
                 "compiler_processes": compilers,
                 "running_build_items": running_builds,
                 "unexplained_compilers": bool(compilers) and not running_builds,
                 "checkpoint_protected": checkpoint_protected,
+                "checkpoint_malformed": malformed,
             }))
+        elif args.cmd == "checkpoint-line":
+            print(do_checkpoint_line(store, args.id, args.state))
         elif args.cmd == "extract-checkpoints":
-            with open(args.tracker_json) as f:
-                raw = json.load(f)
-            entries = raw
-            if isinstance(raw, dict):
-                entries = (raw.get("data") or {}).get("items") \
-                    or raw.get("items") or []
+            entries = _load_tracker_entries(args.tracker_json)
             checkpoints = extract_checkpoints(entries)
             if args.out:
                 with open(args.out, "w") as f:

@@ -133,17 +133,29 @@ every chat:
   reply.
 - Worker checkpointing: if the governor item you are running has a
   `tracker_ref` (its Work Tracker entry id — the enqueueing chat records
-  it with `enqueue --tracker-ref <id>`, or it is set at spawn with
-  `started --tracker-ref <id>`), checkpoint at least every 5 minutes
-  while you work: read the entry on the Work Tracker and update its
-  `details`, preserving the existing text and replacing the checkpoint
-  line — or appending it if none — with
-  `GOVERNOR-CHECKPOINT {"item": "<governor item id>", "ts": <unix epoch seconds>, "state": "<one-line state>"}`.
-  The janitor reads these back every tick; a checkpoint younger than
-  10 minutes is liveness evidence equal to a live worker sighting.
-  Without checkpoints, a run that spends ~60+ minutes in a
-  non-compiling phase can be reaped as stale. Items with no tracker
-  link get no checkpoint protection.
+  it with `enqueue --tracker-ref <id>`, it is set at spawn with
+  `started --tracker-ref <id>`, or retrofitted with
+  `set-tracker-ref --id <id> --tracker-ref <id>`), checkpoint at least
+  every 5 minutes while you work. Generate the checkpoint line with
+  `python3 {{GOVERNOR_DIR}}/governor.py checkpoint-line --id <your governor item id> --state "<one-line state>"`
+  and append the printed line verbatim as the last line of the entry's
+  `details`: read the entry on the Work Tracker, remove any previous
+  checkpoint line, preserve the rest of the text, and write it back
+  with the update action. NEVER hand-write the checkpoint line, an
+  item id, or a timestamp — all three were gotten wrong in the
+  reference deployment on Oct 21, 2026 (the original item's id instead
+  of the running item's, the marker buried mid-paragraph, a timestamp
+  exactly one year stale), each silently voiding protection;
+  `checkpoint-line` derives the id from the item's own record and the
+  timestamp from the system clock, and refuses unknown, unlinked, and
+  terminal items. The janitor reads these back every tick; a
+  checkpoint younger than 10 minutes is liveness evidence equal to a
+  live worker sighting, and a linked entry whose marker yields no
+  valid checkpoint is flagged in the janitor's log as
+  `checkpoint-malformed <id>` instead of failing silently. Without
+  checkpoints, a run that spends ~60+ minutes in a non-compiling phase
+  can be reaped as stale. Items with no tracker link get no checkpoint
+  protection.
 - Gate status (corrected Oct 21, 2026): the janitor cron
   (`governor-janitor`, every 10 min) runs in self-contained conservative
   mode — it reconciles from the queue log plus /proc evidence, never the

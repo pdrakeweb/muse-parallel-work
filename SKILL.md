@@ -1,6 +1,6 @@
 ---
 name: "muse-parallel-work"
-version: "0.2.2"
+version: "0.2.3"
 license: MIT
 description: >
   Manage parallel sub-agent work on a shared machine so batch work never
@@ -31,6 +31,18 @@ description: >
   enqueued before its tracker entry existed — or whose worker created
   the entry at spawn — can still gain checkpoint protection. The
   shipped test suite grows to 55 tests.
+  Version 0.2.3 hardens the checkpoint convention after the first
+  real checkpoints were hand-written wrong three ways (wrong item id,
+  marker buried mid-paragraph, timestamp one year stale — each
+  silently voiding protection): a new `checkpoint-line` command
+  generates the fully-formed heartbeat line with the id and timestamp
+  machine-derived, so workers never hand-write the line, an item id,
+  or a timestamp; the checkpoint parser now finds the marker anywhere
+  in the entry text, not only at line start; and the janitor flags
+  malformed checkpoints (`checkpoint_malformed` in the snapshot
+  diagnostics, `checkpoint-malformed <id>` in its log) instead of
+  letting them fail silently. The shipped test suite grows to
+  72 tests.
   Includes the AGENTS.md template that teaches agents the rules, plus a
   templates pack (janitor cron body, refill cron body, install
   checklist).
@@ -339,7 +351,7 @@ Version 0.1.0 recorded both janitor activation gates as CLOSED. That is
 no longer the state of the reference deployment, and the record is
 corrected here rather than left standing:
 
-| Gate | Status at v0.2.2 | What changed |
+| Gate | Status at v0.2.3 | What changed |
 |---|---|---|
 | §11 load replay (`REPLAY.md`) | **Waived as a janitor gate** by the deployment's owner, Oct 21, 2026 | The replay remains a useful validation procedure for a quiet host. It is not a prerequisite for the janitor, and it was never run as a gate. |
 | Cron-session visibility smoke test | **Failed, and superseded** | Failed Oct 19, 2026 and twice more on Oct 21, 2026 (evidence below). The original janitor design reconciled from the platform's worker listing; the self-contained janitor (Mechanism 4) removes that dependency. The gate's purpose — never over-admit while blind — is preserved by the janitor's conservative rules, not by the test. |
@@ -523,8 +535,11 @@ spawn; the as-built janitor spawns its own workers instead — see
 4. **Build a state-derived snapshot** (`governor.py janitor-snapshot`):
    the admission snapshot is constructed from governor state plus /proc
    evidence — never from the worker listing. Its diagnostics report the
-   live compiler processes, the governor's running build items, and
-   whether compilers are unexplained (below).
+   live compiler processes, the governor's running build items,
+   whether compilers are unexplained (below), and — when the tracker
+   entries were read this tick (`--tracker-json`) — which running
+   items are checkpoint-protected and which carry malformed
+   checkpoints (`checkpoint_malformed`).
 5. **Run one admission pass** (`governor.py admit --snapshot <file>`,
    with `--block-build` when the guard trips). Slot limits and the load
    circuit breaker come from `limits.yaml`; while load1 is above the
@@ -542,8 +557,8 @@ spawn; the as-built janitor spawns its own workers instead — see
 7. **Log every tick** — exactly one line in the janitor log
    (`hidden_files/janitor-log.md`): timestamp, closed items,
    requeued items, reaped/reconciled items with their evidence,
-   admitted and spawned items, and the rails state (HOLD, load1,
-   breaker, unexplained compilers).
+   `checkpoint-malformed <id>` flags, admitted and spawned items, and
+   the rails state (HOLD, load1, breaker, unexplained compilers).
 
 ### Reconciliation and the stale-entry rules
 
@@ -598,24 +613,45 @@ worker-maintained heartbeat in the Work Tracker (Mechanism 3):
   items are refused, since a closed item's checkpoints could never be
   read). Items without a link get no checkpoint protection.
 - **The write.** While the item runs, its worker updates the entry's
-  `details` (the tracker's update action) at least every 5 minutes,
-  preserving the existing text and replacing the heartbeat line — a
-  single line, conventionally the last line of `details`:
+  `details` (the tracker's update action) at least every 5 minutes:
+  generate the heartbeat line with
+  `governor.py checkpoint-line --id <item> --state "<one-line state>"`,
+  remove any previous checkpoint line, preserve the rest of the text,
+  and append the printed line verbatim as the last line. The command
+  derives the item id from the item's own record and the timestamp
+  from the system clock, and refuses unknown, unlinked, and terminal
+  items. **Workers must never hand-write the checkpoint line, an item
+  id, or a timestamp** (v0.2.3): the first real checkpoints were
+  hand-written and failed three ways — the original item's id instead
+  of the running item's, the marker buried mid-paragraph where a
+  line-start parser could not see it, and a timestamp computed
+  exactly one year stale — each silently voiding protection. The line
+  format the command prints:
   `GOVERNOR-CHECKPOINT {"item": "<governor item id>", "ts": <unix epoch seconds>, "state": "<one-line state>"}`
 - **The read.** Each janitor tick, when any running item is
   tracker-linked, the janitor reads the tracker entries back (the list
   action — an ordinary agent tool, available in cron lineage, unlike
   the worker listing), extracts the heartbeats with
   `extract-checkpoints`, and passes them to the snapshot
-  (`janitor-snapshot --checkpoints <file>`). A checkpoint younger than
-  10 minutes (with a 60-second tolerance for future clock skew)
-  protects the item exactly like the <60-minute blanket, past every
-  age/compiler evidence limit.
+  (`janitor-snapshot --checkpoints <file> --tracker-json <listitems file>`).
+  A checkpoint younger than 10 minutes (with a 60-second tolerance for
+  future clock skew) protects the item exactly like the <60-minute
+  blanket, past every age/compiler evidence limit. The parser finds
+  the marker anywhere in the entry's text, not only at line start;
+  the last occurrence whose JSON parses wins.
 - **Binding rules.** A checkpoint carried by any entry other than the
   item's linked entry confers nothing; a stale (>10 min) or missing
   checkpoint confers nothing; and because the snapshot only ever lists
   running items, a checkpoint can never protect a terminal item or
   block a close-out.
+- **Malformed checkpoints are visible, not silent.** A running,
+  tracker-linked item whose linked entry *contains* the marker but
+  yields no valid bound checkpoint — unparseable JSON, a checkpoint
+  naming a different item, or a timestamp outside the freshness
+  window — is reported in the snapshot diagnostics as
+  `checkpoint_malformed` and logged by the janitor as
+  `checkpoint-malformed <id>`. An entry with no marker at all is not
+  flagged: absence is the ordinary stale case, not malformation.
 - **The convention is part of the contract.** The AGENTS.md template
   carries the worker-side rule, and briefs for long-running
   tracker-linked items repeat it. A worker that never checkpoints is
@@ -668,10 +704,13 @@ The janitor never enqueues new work, never edits `queue.jsonl` or
 ### Implementation prerequisite
 
 The janitor depends on four governor commands — `janitor-snapshot`
-(with `--checkpoints`), `admit --block-build`, `requeue-interrupted`,
-and `extract-checkpoints` — plus the `tracker_ref` item field. The
-`governor.py` shipped in this skill (v0.2.2) includes all of them,
-with unit tests (snapshot protection rules including checkpoints, the
+(with `--checkpoints` and `--tracker-json`), `admit --block-build`,
+`requeue-interrupted`, and `extract-checkpoints` — plus the
+`tracker_ref` item field and the worker-side `checkpoint-line` and
+`set-tracker-ref` commands. The `governor.py` shipped in this skill
+(v0.2.3) includes all of them, with unit tests (snapshot protection
+rules including checkpoints, checkpoint-line generation and refusals,
+mid-paragraph marker parsing, malformed-checkpoint flagging, the
 block-build pass, the /proc compiler scan, interrupted requeue under
 the attempt cap, and an end-to-end phantom-reaping flow). If you port
 the governor instead of adopting the shipped file, port that behavior,
@@ -755,7 +794,7 @@ The full sequence, with verification at each step, is
    `metrics.jsonl` on first use.
 3. Tune `limits.yaml` per the procedure above.
 4. Verify: `cd <governor-dir> && python3 -m unittest test_governor`
-   (55 tests) and `python3 governor.py status`.
+   (72 tests) and `python3 governor.py status`.
 5. Paste the filled-in `AGENTS-TEMPLATE.md` section into your AGENTS.md.
    Operate under the interim cap + governor procedure together from here
    on; the cap remains in force for chat dispatch through every later
@@ -779,7 +818,7 @@ The full sequence, with verification at each step, is
 | `AGENTS-TEMPLATE.md` | The AGENTS.md section to paste into your runtime's instructions. |
 | `README.md` | Human-facing summary: what it is, the incident, install, gate status. |
 | `governor.py` | The reference implementation (stdlib-only Python 3). |
-| `test_governor.py` | 46-test unittest suite for governor.py. |
+| `test_governor.py` | 72-test unittest suite for governor.py. |
 | `limits.yaml` | Template limits with tuning guidance. |
 | `DESIGN.md` | The full design and decision record, incl. the council-modifications addendum and the v0.2.0 status correction. |
 | `REPLAY.md` | The §11 validation procedure (optional validation since Oct 21, 2026; not an activation gate). |

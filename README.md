@@ -65,7 +65,7 @@ built from that incident.
    2 vCPU / 7 GB VM where one build already saturates both cores.
    Measure your host first — vCPUs, RAM, one real build's peak — and
    scale by the arithmetic in the template's comments, not by preference.
-4. Verify: `python3 -m unittest test_governor` (55 tests) and
+4. Verify: `python3 -m unittest test_governor` (72 tests) and
    `python3 governor.py status`.
 5. Paste the filled-in section from `AGENTS-TEMPLATE.md` into the
    AGENTS.md your agent runtime loads. That template carries the dispatch
@@ -99,7 +99,11 @@ superseded:
   Workers on tracker-linked items also write checkpoint heartbeats
   into their Work Tracker entries every ~5 minutes; a checkpoint
   younger than 10 minutes protects a running item like a live
-  sighting. (The `gates.janitor_cron_active` flag in limits.yaml
+  sighting. Workers generate the heartbeat line with the
+  `checkpoint-line` command and never hand-write it, an item id, or a
+  timestamp (hand-written lines failed three ways on Oct 21, 2026);
+  the janitor flags malformed checkpoints in its log instead of
+  letting them fail silently. (The `gates.janitor_cron_active` flag in limits.yaml
   lagged activation briefly — the janitor build could not change
   limits values; it was flipped in a separate change and the status
   line now reads ACTIVE.)
@@ -124,7 +128,7 @@ this README.
 | `templates/install-checklist.md` | The combined install checklist (governor → tracker → refill → janitor). |
 | `VERSION` | Skill version. |
 | `governor.py` | The reference implementation. |
-| `test_governor.py` | 55 tests covering budgets, promotion order, aging, fan-out, reservations, the breaker, locking, the janitor snapshot, checkpoint heartbeats, and the CLI. |
+| `test_governor.py` | 72 tests covering budgets, promotion order, aging, fan-out, reservations, the breaker, locking, the janitor snapshot, checkpoint heartbeats, checkpoint-line generation, malformed-checkpoint flagging, and the CLI. |
 | `limits.yaml` | Template limits with tuning guidance. |
 | `DESIGN.md` | The design and decision record, including the council-modifications addendum. |
 | `REPLAY.md` | The load-replay validation procedure. |
