@@ -65,7 +65,7 @@ built from that incident.
    2 vCPU / 7 GB VM where one build already saturates both cores.
    Measure your host first — vCPUs, RAM, one real build's peak — and
    scale by the arithmetic in the template's comments, not by preference.
-4. Verify: `python3 -m unittest test_governor` (46 tests) and
+4. Verify: `python3 -m unittest test_governor` (55 tests) and
    `python3 governor.py status`.
 5. Paste the filled-in section from `AGENTS-TEMPLATE.md` into the
    AGENTS.md your agent runtime loads. That template carries the dispatch
@@ -124,7 +124,7 @@ this README.
 | `templates/install-checklist.md` | The combined install checklist (governor → tracker → refill → janitor). |
 | `VERSION` | Skill version. |
 | `governor.py` | The reference implementation. |
-| `test_governor.py` | 46 tests covering budgets, promotion order, aging, fan-out, reservations, the breaker, locking, the janitor snapshot, checkpoint heartbeats, and the CLI. |
+| `test_governor.py` | 55 tests covering budgets, promotion order, aging, fan-out, reservations, the breaker, locking, the janitor snapshot, checkpoint heartbeats, and the CLI. |
 | `limits.yaml` | Template limits with tuning guidance. |
 | `DESIGN.md` | The design and decision record, including the council-modifications addendum. |
 | `REPLAY.md` | The load-replay validation procedure. |

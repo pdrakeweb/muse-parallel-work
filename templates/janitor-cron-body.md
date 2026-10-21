@@ -19,7 +19,7 @@
 > `janitor-snapshot` (with `--checkpoints`), `admit --block-build`,
 > `requeue-interrupted`, and `extract-checkpoints` — plus the
 > `tracker_ref` item field, with tests. The governor.py shipped in this
-> skill (v0.2.1) includes them; the reference deployment added them on
+> skill (v0.2.2) includes them; the reference deployment added them on
 > Oct 21, 2026. Do not enable this cron against a governor build that
 > lacks them.
 

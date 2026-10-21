@@ -558,6 +558,112 @@ class TestCheckpointCli(unittest.TestCase):
             shutil.rmtree(d, ignore_errors=True)
 
 
+class TestSetTrackerRef(GovernorCase):
+    """Retrofit command (Oct 21, 2026): tracker_ref settable on an
+    existing queued/admitted/running item — items enqueued before
+    their tracker entry existed can still gain checkpoint protection.
+    Terminal items are refused; the value rides the event log, so it
+    survives a rebuild."""
+
+    def test_set_on_queued(self):
+        iid = self.enqueue("queued relaunch")["id"]
+        out = gov.do_set_tracker_ref(self.store, iid, "74", now=T0)
+        self.assertEqual(out, {"id": iid, "state": "queued",
+                               "tracker_ref": 74})
+        self.assertEqual(self.items()[iid]["tracker_ref"], 74)
+
+    def test_set_on_admitted(self):
+        iid = self.enqueue("admitted relaunch")["id"]
+        self.admit(now=T0)
+        self.assertEqual(self.items()[iid]["state"], "admitted")
+        out = gov.do_set_tracker_ref(self.store, iid, 75, now=T0 + 1)
+        self.assertEqual(out["state"], "admitted")
+        self.assertEqual(self.items()[iid]["tracker_ref"], 75)
+
+    def test_set_on_running(self):
+        iid = self.enqueue("running relaunch")["id"]
+        self.admit(now=T0)
+        gov.do_started(self.store, iid, "w-run", now=T0)
+        out = gov.do_set_tracker_ref(self.store, iid, "76", now=T0 + 60)
+        self.assertEqual(out["state"], "running")
+        item = self.items()[iid]
+        self.assertEqual(item["tracker_ref"], 76)
+        self.assertEqual(item["worker_agent_id"], "w-run")  # untouched
+
+    def test_refused_on_done(self):
+        iid = self.enqueue("finished")["id"]
+        self.admit(now=T0)
+        gov.do_started(self.store, iid, "w-done", now=T0)
+        gov.do_close(self.store, iid, "done", now=T0 + 10)
+        with self.assertRaises(gov.GovernorError):
+            gov.do_set_tracker_ref(self.store, iid, 77, now=T0 + 20)
+        self.assertIsNone(self.items()[iid]["tracker_ref"])
+
+    def test_refused_on_failed(self):
+        iid = self.enqueue("doomed")["id"]
+        self.admit(now=T0)
+        gov.do_started(self.store, iid, "w-fail", now=T0)
+        gov.do_close(self.store, iid, "failed", error="boom", now=T0 + 10)
+        with self.assertRaises(gov.GovernorError):
+            gov.do_set_tracker_ref(self.store, iid, 77, now=T0 + 20)
+
+    def test_unknown_item_refused(self):
+        with self.assertRaises(gov.GovernorError):
+            gov.do_set_tracker_ref(self.store, "no-such-item", 77, now=T0)
+
+    def test_survives_rebuild(self):
+        iid = self.enqueue("rebuild me")["id"]
+        gov.do_set_tracker_ref(self.store, iid, "88", now=T0)
+        events = [e["event"] for e in self.store.read_events()]
+        self.assertIn("set_tracker_ref", events)
+        self.store.rebuild()
+        self.store.save_state()
+        self.assertEqual(self.items()[iid]["tracker_ref"], 88)
+
+    def test_checkpoint_protection_after_retrofit(self):
+        # The point of the retrofit: a long-running item linked after
+        # the fact is protected by a fresh checkpoint in its entry.
+        iid = self.enqueue("old runner")["id"]
+        self.admit(now=T0)
+        gov.do_started(self.store, iid, "w-old", now=T0)
+        gov.do_set_tracker_ref(self.store, iid, 72, now=T0 + 3600)
+        now = T0 + 70 * 60
+        cps = {iid: {"ts": now - 60, "tracker_id": 72,
+                     "state": "working"}}
+        snap = gov.build_janitor_snapshot(self.store, now=now,
+                                          checkpoints=cps)
+        self.assertIn("w-old", {a["agent_id"] for a in snap["agents"]})
+
+
+class TestSetTrackerRefCli(unittest.TestCase):
+    def test_set_tracker_ref_cli(self):
+        d = tempfile.mkdtemp(prefix="gov-setref-cli-")
+        try:
+            shutil.copy(os.path.join(HERE, "limits.yaml"),
+                        os.path.join(d, "limits.yaml"))
+            env = dict(os.environ, GOVERNOR_LOAD1="1.0")
+            script = os.path.join(HERE, "governor.py")
+
+            def run(*argv):
+                return subprocess.run(
+                    [sys.executable, script, "--dir", d] + list(argv),
+                    capture_output=True, text=True, env=env, timeout=30)
+
+            r = run("enqueue", "--title", "unlinked job")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            iid = json.loads(r.stdout)["id"]
+            r = run("set-tracker-ref", "--id", iid, "--tracker-ref", "91")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(json.loads(r.stdout)["tracker_ref"], 91)
+            r = run("done", "--id", iid)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            r = run("set-tracker-ref", "--id", iid, "--tracker-ref", "92")
+            self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+            self.assertIn("done", json.loads(r.stdout)["detail"])
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+
 class TestBlockResources(GovernorCase):
     def test_block_build_admits_light_only(self):
         b = self.enqueue("blocked build", resource="build")["id"]

@@ -1,6 +1,6 @@
 ---
 name: "muse-parallel-work"
-version: "0.2.1"
+version: "0.2.2"
 license: MIT
 description: >
   Manage parallel sub-agent work on a shared machine so batch work never
@@ -25,6 +25,12 @@ description: >
   equal to a live worker sighting — so a run in a long non-compiling
   phase is no longer indistinguishable from a dead one. The shipped
   governor.py and test suite are updated to match (46 tests).
+  Version 0.2.2 adds `set-tracker-ref`, a retrofit command that links
+  an existing queued, admitted, or running item to its Work Tracker
+  entry after the fact (terminal items are refused), so an item
+  enqueued before its tracker entry existed — or whose worker created
+  the entry at spawn — can still gain checkpoint protection. The
+  shipped test suite grows to 55 tests.
   Includes the AGENTS.md template that teaches agents the rules, plus a
   templates pack (janitor cron body, refill cron body, install
   checklist).
@@ -333,7 +339,7 @@ Version 0.1.0 recorded both janitor activation gates as CLOSED. That is
 no longer the state of the reference deployment, and the record is
 corrected here rather than left standing:
 
-| Gate | Status at v0.2.1 | What changed |
+| Gate | Status at v0.2.2 | What changed |
 |---|---|---|
 | §11 load replay (`REPLAY.md`) | **Waived as a janitor gate** by the deployment's owner, Oct 21, 2026 | The replay remains a useful validation procedure for a quiet host. It is not a prerequisite for the janitor, and it was never run as a gate. |
 | Cron-session visibility smoke test | **Failed, and superseded** | Failed Oct 19, 2026 and twice more on Oct 21, 2026 (evidence below). The original janitor design reconciled from the platform's worker listing; the self-contained janitor (Mechanism 4) removes that dependency. The gate's purpose — never over-admit while blind — is preserved by the janitor's conservative rules, not by the test. |
@@ -585,9 +591,12 @@ their attempt cap through interrupted cycles. The fix is a
 worker-maintained heartbeat in the Work Tracker (Mechanism 3):
 
 - **The link.** A governor item may carry `tracker_ref` — the id of its
-  Work Tracker entry — recorded with `enqueue --tracker-ref <id>` or at
-  spawn time with `started --tracker-ref <id>`. Items without a link
-  get no checkpoint protection.
+  Work Tracker entry — recorded with `enqueue --tracker-ref <id>`, at
+  spawn time with `started --tracker-ref <id>`, or retrofitted onto an
+  existing queued, admitted, or running item with
+  `set-tracker-ref --id <item> --tracker-ref <id>` (v0.2.2; terminal
+  items are refused, since a closed item's checkpoints could never be
+  read). Items without a link get no checkpoint protection.
 - **The write.** While the item runs, its worker updates the entry's
   `details` (the tracker's update action) at least every 5 minutes,
   preserving the existing text and replacing the heartbeat line — a
@@ -661,7 +670,7 @@ The janitor never enqueues new work, never edits `queue.jsonl` or
 The janitor depends on four governor commands — `janitor-snapshot`
 (with `--checkpoints`), `admit --block-build`, `requeue-interrupted`,
 and `extract-checkpoints` — plus the `tracker_ref` item field. The
-`governor.py` shipped in this skill (v0.2.1) includes all of them,
+`governor.py` shipped in this skill (v0.2.2) includes all of them,
 with unit tests (snapshot protection rules including checkpoints, the
 block-build pass, the /proc compiler scan, interrupted requeue under
 the attempt cap, and an end-to-end phantom-reaping flow). If you port
@@ -746,7 +755,7 @@ The full sequence, with verification at each step, is
    `metrics.jsonl` on first use.
 3. Tune `limits.yaml` per the procedure above.
 4. Verify: `cd <governor-dir> && python3 -m unittest test_governor`
-   (46 tests) and `python3 governor.py status`.
+   (55 tests) and `python3 governor.py status`.
 5. Paste the filled-in `AGENTS-TEMPLATE.md` section into your AGENTS.md.
    Operate under the interim cap + governor procedure together from here
    on; the cap remains in force for chat dispatch through every later

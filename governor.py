@@ -769,6 +769,38 @@ def do_started(store, item_id, worker_agent_id, now=None, tracker_ref=None):
         store.release_lock()
 
 
+def do_set_tracker_ref(store, item_id, tracker_ref, now=None):
+    """Retrofit (Oct 21, 2026): set/refresh an existing item's Work
+    Tracker link after enqueue — the checkpoint build made tracker_ref
+    settable only at enqueue/started, but items enqueued before their
+    tracker entry existed (e.g. the two LLMdil relaunches) had no way
+    to gain checkpoint protection. Allowed on queued/admitted/running
+    items; terminal items are refused (their checkpoints could never
+    be read, and rewriting a closed record would corrupt the log's
+    meaning). Goes through the normal event/state machinery, so the
+    value survives a rebuild like every other field."""
+    now = time.time() if now is None else now
+    store.acquire_lock()
+    try:
+        it = store.state["items"].get(item_id)
+        if it is None:
+            raise GovernorError("unknown item %s" % item_id)
+        if it["state"] not in ("queued", "admitted", "running"):
+            raise GovernorError(
+                "item %s is %s; tracker_ref can only be set on a "
+                "queued, admitted or running item"
+                % (item_id, it["state"]))
+        it["tracker_ref"] = _norm_tracker_ref(tracker_ref)
+        _emit(store, "set_tracker_ref", it, now,
+              {"tracker_ref": it["tracker_ref"]})
+        store.state["updated_at"] = now_iso(now)
+        store.save_state()
+        return {"id": item_id, "state": it["state"],
+                "tracker_ref": it["tracker_ref"]}
+    finally:
+        store.release_lock()
+
+
 def do_close(store, item_id, outcome, error=None, now=None):
     now = time.time() if now is None else now
     store.acquire_lock()
@@ -921,6 +953,12 @@ def main(argv=None):
     p.add_argument("--tracker-ref",
                    help="set/refresh the item's Work Tracker entry link")
 
+    p = sub.add_parser("set-tracker-ref")
+    p.add_argument("--id", required=True)
+    p.add_argument("--tracker-ref", required=True,
+                   help="Work Tracker entry id to link to an existing "
+                        "queued/admitted/running item")
+
     p = sub.add_parser("done")
     p.add_argument("--id", required=True)
 
@@ -999,6 +1037,9 @@ def main(argv=None):
         elif args.cmd == "started":
             print(json.dumps(do_started(store, args.id, args.worker,
                                         tracker_ref=args.tracker_ref)))
+        elif args.cmd == "set-tracker-ref":
+            print(json.dumps(do_set_tracker_ref(store, args.id,
+                                                args.tracker_ref)))
         elif args.cmd == "done":
             print(json.dumps(do_close(store, args.id, "done")))
         elif args.cmd == "fail":
