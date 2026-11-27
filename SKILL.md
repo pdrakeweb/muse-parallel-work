@@ -44,7 +44,7 @@ description: >
   letting them fail silently. The shipped test suite grows to
   72 tests.
   Version 0.2.4 adds `brief_lint.py`: enqueue rejects an in-scope
-  brief missing Pete's standing artifact instruction, before any queue
+  brief missing the user's standing artifact instruction, before any queue
   write; `--fix` appends the verbatim line.
   Includes the AGENTS.md template that teaches agents the rules, plus a
   templates pack (janitor cron body, refill cron body, install
@@ -274,7 +274,7 @@ binary-update job that swaps toolchain binaries overnight.)
 
 `brief_lint.py` (stdlib-only) checks a brief before enqueue: a brief whose
 output becomes an artifact, dashboard, UI, widget, wishlist, page, tracker,
-or infographic must carry Pete's standing artifact instruction verbatim.
+or infographic must carry the user's standing artifact instruction verbatim.
 `brief_lint.py --fix <brief>` appends it. Classification: `--artifact` /
 `--no-artifact` flags win; otherwise frontmatter `output_type` / `output`
 against the artifact type list; otherwise a keyword heuristic over the body
@@ -459,11 +459,11 @@ is `templates/refill-cron-body.md`; the operating summary:
      the tracker entry plus its linked detail without inventing a
      decision the owner has not made: concrete outcome, identifiable
      scope and workspace, checkable completion condition.
-   - **NEEDS PETE** — the next step is a decision, approval, purchase,
+   - **NEEDS USER** — the next step is a decision, approval, purchase,
      booking, send, deletion, or policy choice belonging to the owner.
      Never enqueued, and not council material. Work that spends money,
      books, sends messages, deletes data, or changes an account is
-     NEEDS PETE by definition.
+     NEEDS USER by definition.
    - **ILL-DEFINED** — plausibly executable but missing scope, outcome,
      or completion condition, and not blocked on an owner decision.
      These go to council (below).
@@ -492,12 +492,12 @@ is `templates/refill-cron-body.md`; the operating summary:
    brief — outcome, scope, completion check — or rule that an owner
    decision is required and state exactly which decision. A refined brief
    at **≥ MEDIUM confidence** is written and enqueued under the normal
-   rules. A Pete-decision ruling, or confidence below MEDIUM, is
-   recorded as a `needs-pete` disposition with the exact decision
+   rules. A user-decision ruling, or confidence below MEDIUM, is
+   recorded as a `needs-user` disposition with the exact decision
    question, and nothing is enqueued.
 6. **Report** to the main chat only when the run did something: enqueued
    items (title, class, resource, source tracker, governor item id) and
-   Needs-Pete items with the exact pending decision. Each Needs-Pete
+   Needs-User items with the exact pending decision. Each Needs-User
    item is reported once; it is not re-reported unless 7 days have
    passed or its tracker entry changed. Not-idle runs, empty scans, and
    fully-dispositioned scans stay silent.
@@ -839,7 +839,7 @@ The full sequence, with verification at each step, is
 | `AGENTS-TEMPLATE.md` | The AGENTS.md section to paste into your runtime's instructions. |
 | `README.md` | Human-facing summary: what it is, the incident, install, gate status. |
 | `governor.py` | The reference implementation (stdlib-only Python 3). |
-| `brief_lint.py` | Rejects governor briefs whose output becomes an artifact/UI but lack Pete's standing artifact instruction; `--fix` appends it. |
+| `brief_lint.py` | Rejects governor briefs whose output becomes an artifact/UI but lack the user's standing artifact instruction; `--fix` appends it. |
 | `test_brief_lint.py` | Unittest suite for brief_lint.py. |
 | `test_governor.py` | 72-test unittest suite for governor.py. |
 | `limits.yaml` | Template limits with tuning guidance. |
