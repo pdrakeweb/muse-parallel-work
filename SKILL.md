@@ -1,6 +1,6 @@
 ---
 name: "muse-parallel-work"
-version: "0.2.3"
+version: "0.2.4"
 license: MIT
 description: >
   Manage parallel sub-agent work on a shared machine so batch work never
@@ -43,6 +43,9 @@ description: >
   diagnostics, `checkpoint-malformed <id>` in its log) instead of
   letting them fail silently. The shipped test suite grows to
   72 tests.
+  Version 0.2.4 adds `brief_lint.py`: enqueue rejects an in-scope
+  brief missing Pete's standing artifact instruction, before any queue
+  write; `--fix` appends the verbatim line.
   Includes the AGENTS.md template that teaches agents the rules, plus a
   templates pack (janitor cron body, refill cron body, install
   checklist).
@@ -56,6 +59,9 @@ when_to_use: >
   machine where interactive chat and batch workers share CPU, RAM, and an
   inference queue.
 ---
+
+Repository: https://github.com/pdrakeweb/muse-parallel-work
+
 
 # Muse Parallel Work
 
@@ -263,6 +269,21 @@ writes its reason and start time inside the file and removes it when
 done. A HOLD older than 3 hours is stale: any chat may remove it after
 noting the fact in its reply. (Used, for example, by a weekly
 binary-update job that swaps toolchain binaries overnight.)
+
+### Brief lint — the artifact standing rule, enforced
+
+`brief_lint.py` (stdlib-only) checks a brief before enqueue: a brief whose
+output becomes an artifact, dashboard, UI, widget, wishlist, page, tracker,
+or infographic must carry Pete's standing artifact instruction verbatim.
+`brief_lint.py --fix <brief>` appends it. Classification: `--artifact` /
+`--no-artifact` flags win; otherwise frontmatter `output_type` / `output`
+against the artifact type list; otherwise a keyword heuristic over the body
+that errs toward in scope.
+
+`governor.py` enqueue runs the lint first: an in-scope brief missing the
+line is rejected before any queue write (fix with `brief_lint.py --fix
+<brief>` and re-enqueue). Never bypass a rejection — fix the brief.
+Tests: `test_brief_lint.py` (`python3 -m unittest test_brief_lint`).
 
 ### Priority classes
 
@@ -818,6 +839,8 @@ The full sequence, with verification at each step, is
 | `AGENTS-TEMPLATE.md` | The AGENTS.md section to paste into your runtime's instructions. |
 | `README.md` | Human-facing summary: what it is, the incident, install, gate status. |
 | `governor.py` | The reference implementation (stdlib-only Python 3). |
+| `brief_lint.py` | Rejects governor briefs whose output becomes an artifact/UI but lack Pete's standing artifact instruction; `--fix` appends it. |
+| `test_brief_lint.py` | Unittest suite for brief_lint.py. |
 | `test_governor.py` | 72-test unittest suite for governor.py. |
 | `limits.yaml` | Template limits with tuning guidance. |
 | `DESIGN.md` | The full design and decision record, incl. the council-modifications addendum and the v0.2.0 status correction. |
