@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """brief_lint.py — reject governor briefs whose output becomes an artifact/UI
-but lack Pete's standing artifact instruction (AGENTS.md §2).
+but lack the user's standing artifact instruction (AGENTS.md §2).
 
 Usage:
   brief_lint.py BRIEF [BRIEF ...] [--fix] [--artifact | --no-artifact] [--quiet]
@@ -47,7 +47,7 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 STANDING_LINE = (
-    "Standing instruction from Pete (Nov 8 and Nov 13, 2026): artifacts are primarily "
+    "Standing instruction from the user (Nov 8 and Nov 13, 2026): artifacts are primarily "
     "infographic/chart/table, minimal narrative — lead with numbers as visualizations; "
     "prose only as short labels, captions, and footnotes; convert prose findings into "
     "charts/tables rather than embedding paragraphs."
@@ -119,7 +119,7 @@ def lint_text(text: str, force: Optional[bool] = None) -> Tuple[bool, str]:
         return True, f"out of scope ({why})"
     if has_standing_line(text):
         return True, f"ok ({why})"
-    return False, f"in scope ({why}) but missing Pete's standing artifact instruction"
+    return False, f"in scope ({why}) but missing the user's standing artifact instruction"
 
 
 def lint_file(path, force: Optional[bool] = None) -> Tuple[bool, str]:
@@ -130,7 +130,7 @@ def lint_file(path, force: Optional[bool] = None) -> Tuple[bool, str]:
 def fix_file(path, force: Optional[bool] = None) -> bool:
     """Append the standing block if missing. Returns True if the file was changed.
 
-    Appending keeps Pete's own style words (already in the body) ahead of the
+    Appending keeps the user's own style words (already in the body) ahead of the
     standing line, per AGENTS.md §2 ordering.
     """
     p = Path(path)
