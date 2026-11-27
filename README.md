@@ -133,3 +133,4 @@ this README.
 | `DESIGN.md` | The design and decision record, including the council-modifications addendum. |
 | `REPLAY.md` | The load-replay validation procedure. |
 | `examples/example-brief.md` | What a self-contained queue-item brief looks like. |
+| `governor-space/` | The Governor Queue space definition: the governor's control surface — live queue board with enqueue, admission, cancel/requeue, HOLD, and close; see `governor-space/README.md` and `governor-space/ACTIONS.md`. |
