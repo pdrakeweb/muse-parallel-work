@@ -50,8 +50,8 @@ built from that incident.
 
 1. Copy this folder into your agent's skills directory.
 2. Create a governor directory **under your home directory** (for example
-   `~/workspace/parallelism-governor/`) and copy `governor.py`,
-   `test_governor.py`, `limits.yaml`, `DESIGN.md`, and `REPLAY.md` into
+   `~/workspace/parallelism-governor/`) and copy `governor.py`, `brief_lint.py`,
+   `test_governor.py`, `test_brief_lint.py`, `limits.yaml`, `DESIGN.md`, and `REPLAY.md` into
    it. The governor creates its queue files (`queue.jsonl`, `state.json`,
    `briefs/`, `metrics.jsonl`) on first use.
 
@@ -65,7 +65,7 @@ built from that incident.
    2 vCPU / 7 GB VM where one build already saturates both cores.
    Measure your host first — vCPUs, RAM, one real build's peak — and
    scale by the arithmetic in the template's comments, not by preference.
-4. Verify: `python3 -m unittest test_governor` (72 tests) and
+4. Verify: `python3 -m unittest test_governor` (81 tests; plus `test_brief_lint`, 9 tests) and
    `python3 governor.py status`.
 5. Paste the filled-in section from `AGENTS-TEMPLATE.md` into the
    AGENTS.md your agent runtime loads. That template carries the dispatch
@@ -121,14 +121,17 @@ this README.
 
 | File | What it is |
 |---|---|
-| `SKILL.md` | The agent-facing playbook: principles, all mechanisms, full governor procedure, gate corrections, the janitor and refill designs, the cron inventory, known gaps. |
+| `SKILL.md` | The agent-facing playbook: hard rules, the interim cap, the governor procedure, HOLD, checkpoints, and summaries of the refill and janitor. |
+| `references/` | Full janitor and refill rules (`janitor.md`, `backlog-and-refill.md`) and the incident and gate-status record (`history.md`). |
+| `CHANGELOG.md` | Version history. |
 | `AGENTS-TEMPLATE.md` | The AGENTS.md sections to adopt, with placeholders. |
 | `templates/janitor-cron-body.md` | The janitor cron body as a placeholder template. |
 | `templates/refill-cron-body.md` | The refill cron body as a placeholder template. |
 | `templates/install-checklist.md` | The combined install checklist (governor → tracker → refill → janitor). |
 | `VERSION` | Skill version. |
 | `governor.py` | The reference implementation. |
-| `test_governor.py` | 72 tests covering budgets, promotion order, aging, fan-out, reservations, the breaker, locking, the janitor snapshot, checkpoint heartbeats, checkpoint-line generation, malformed-checkpoint flagging, and the CLI. |
+| `test_governor.py` | 81 tests covering budgets, promotion order, aging, fan-out, reservations, the breaker, locking, the janitor snapshot, checkpoint heartbeats, checkpoint-line generation, malformed-checkpoint flagging, the HOLD file, crash-torn log lines, the enqueue brief lint, and the CLI. |
+| `brief_lint.py` / `test_brief_lint.py` | Brief lint run by `enqueue`; `--fix` appends the standing artifact instruction. 9 tests. |
 | `limits.yaml` | Template limits with tuning guidance. |
 | `DESIGN.md` | The design and decision record, including the council-modifications addendum. |
 | `REPLAY.md` | The load-replay validation procedure. |
