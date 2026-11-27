@@ -48,10 +48,10 @@ class TestBriefLint(unittest.TestCase):
     def test_fix_appends_after_body_and_is_idempotent(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "brief.md"
-            p.write_text("Pete style: dark mode, big numbers.\nBuild a wishlist page.\n", encoding="utf-8")
+            p.write_text("User style: dark mode, big numbers.\nBuild a wishlist page.\n", encoding="utf-8")
             self.assertTrue(bl.fix_file(p))
             out = p.read_text(encoding="utf-8")
-            self.assertLess(out.index("Pete style"), out.index("Standing instruction from Pete"))
+            self.assertLess(out.index("User style"), out.index("Standing instruction from the user"))
             self.assertTrue(bl.lint_file(p)[0])
             self.assertFalse(bl.fix_file(p))  # second run changes nothing
 
