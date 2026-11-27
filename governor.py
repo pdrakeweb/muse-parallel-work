@@ -134,8 +134,10 @@ class Store:
         self.metrics_path = os.path.join(self.dir, "metrics.jsonl")
         self.briefs_dir = os.path.join(self.dir, "briefs")
         self.lock_dir = os.path.join(self.dir, "lock")
+        self.hold_path = os.path.join(self.dir, "HOLD")
         self.limits = load_limits(self.limits_path)
         self._lock_depth = 0
+        self._lock_token = None
         os.makedirs(self.briefs_dir, exist_ok=True)
         for p in (self.queue_path, self.metrics_path):
             if not os.path.exists(p):
@@ -170,8 +172,20 @@ class Store:
         os.replace(tmp, self.state_path)
 
     def append_event(self, event):
+        # A crash mid-append leaves a torn line with no newline; without
+        # this guard the next event would be glued onto it and lost too.
+        prefix = ""
+        try:
+            with open(self.queue_path, "rb") as f:
+                f.seek(0, os.SEEK_END)
+                if f.tell() > 0:
+                    f.seek(-1, os.SEEK_END)
+                    if f.read(1) != b"\n":
+                        prefix = "\n"
+        except OSError:
+            pass
         with open(self.queue_path, "a") as f:
-            f.write(json.dumps(event, sort_keys=True) + "\n")
+            f.write(prefix + json.dumps(event, sort_keys=True) + "\n")
             f.flush()
             os.fsync(f.fileno())
 
@@ -185,7 +199,7 @@ class Store:
                 try:
                     events.append(json.loads(line))
                 except json.JSONDecodeError:
-                    break  # torn final line: damage bounded to it (design S10)
+                    continue  # torn line: damage bounded to it (design S10)
         return events
 
     def rebuild(self):
@@ -247,9 +261,16 @@ class Store:
         while True:
             try:
                 os.mkdir(self.lock_dir)
+                token = uuid.uuid4().hex
                 with open(os.path.join(self.lock_dir, "holder.json"), "w") as f:
-                    json.dump({"pid": os.getpid(), "ts": time.time()}, f)
+                    json.dump({"pid": os.getpid(), "ts": time.time(),
+                               "token": token}, f)
+                self._lock_token = token
                 self._lock_depth = 1
+                # State was loaded when this Store was built, possibly
+                # before another process wrote; re-read it under the lock
+                # so this writer never clobbers that write.
+                self.state = self._load_state()
                 return
             except FileExistsError:
                 holder_ts = None
@@ -263,7 +284,14 @@ class Store:
                         continue
                 age = time.time() - holder_ts
                 if age > self.steal_threshold():
-                    shutil.rmtree(self.lock_dir, ignore_errors=True)
+                    # Rename first so the steal is atomic: a concurrent
+                    # stealer cannot delete a lock that was just re-made.
+                    grave = "%s.stale.%s" % (self.lock_dir, uuid.uuid4().hex)
+                    try:
+                        os.rename(self.lock_dir, grave)
+                    except OSError:
+                        continue
+                    shutil.rmtree(grave, ignore_errors=True)
                     continue
                 if time.time() >= deadline:
                     raise LockBusy(
@@ -276,7 +304,16 @@ class Store:
             self._lock_depth -= 1
             return
         self._lock_depth = 0
-        shutil.rmtree(self.lock_dir, ignore_errors=True)
+        token, self._lock_token = self._lock_token, None
+        try:
+            with open(os.path.join(self.lock_dir, "holder.json")) as f:
+                held = json.load(f).get("token")
+        except Exception:
+            held = None
+        if token is not None and held == token:
+            shutil.rmtree(self.lock_dir, ignore_errors=True)
+        # Otherwise the lock was stolen while this process held it (it
+        # overran the steal threshold); the current lock is someone else's.
 
 
 # ---------- priority ----------
@@ -627,14 +664,15 @@ def do_enqueue(store, title, cls="P3", resource="light", owner_chat_id=None,
                 owner_chat_id=owner_chat_id, owner_chat_name=owner_chat_name,
                 brief_text=brief_text, brief_file=brief_file,
                 resume_pointer=resume_pointer, depends_on=depends_on,
-                idempotency_key=idempotency_key, fanout=int(fanout), now=now,
-                _bundle="self")
+                idempotency_key=idempotency_key, tracker_ref=tracker_ref,
+                fanout=int(fanout), now=now, _bundle="self")
             children = []
             for i in range(int(fanout)):
                 child = do_enqueue(
                     store, "%s (child %d of %d)" % (title, i + 1, int(fanout)),
                     cls=cls, resource=resource, owner_chat_id=owner_chat_id,
                     owner_chat_name=owner_chat_name, brief_text=brief_text,
+                    brief_file=brief_file,
                     resume_pointer=resume_pointer, depends_on=depends_on,
                     now=now, _bundle=parent["id"], _bundle_index=i)
                 children.append(child["id"])
@@ -747,10 +785,23 @@ def _reconcile(store, snapshot, now):
     return interrupted, requeued
 
 
+def read_hold(store):
+    """The HOLD file pauses admissions while it exists (SKILL.md, HOLD
+    protocol). Returns (held, first line of its content)."""
+    try:
+        with open(store.hold_path) as f:
+            return True, f.readline().strip()[:200]
+    except FileNotFoundError:
+        return False, None
+    except OSError:
+        return True, "(HOLD present but unreadable)"
+
+
 def do_admit(store, snapshot, now=None, load1=None,
              block_resources=frozenset()):
     """One admission pass. Returns a result dict; the caller spawns the
-    admitted items outside this call. Resources in block_resources are
+    admitted items outside this call. Reconciliation always runs; a HOLD
+    file or the load breaker stops only the admission step. Resources in block_resources are
     treated as fully occupied for this pass (the janitor's unexplained-
     compiler guard blocks "build" this way) while other resources are
     admitted normally."""
@@ -764,8 +815,9 @@ def do_admit(store, snapshot, now=None, load1=None,
         threshold = float(lim(store.limits, "circuit_breaker",
                                "loadavg_threshold", 5.0))
         breaker = load1 > threshold
+        hold, hold_reason = read_hold(store)
         admitted = []
-        if not breaker:
+        if not breaker and not hold:
             u = usage(store.state["items"], snapshot, store.limits)
             queued = [it for it in store.state["items"].values()
                       if it["state"] == "queued"
@@ -787,6 +839,7 @@ def do_admit(store, snapshot, now=None, load1=None,
         duration = time.monotonic() - started
         result = {"admitted": admitted, "interrupted": interrupted,
                   "requeued": requeued, "circuit_breaker": breaker,
+                  "hold": hold, "hold_reason": hold_reason,
                   "blocked_resources": sorted(block_resources),
                   "load1": load1, "duration_s": round(duration, 6)}
         store.record_pass(duration, len(admitted))
@@ -919,6 +972,9 @@ def status_text(store, now=None, load1=None):
                     float(lim(limits, "circuit_breaker", "loadavg_threshold", 5.0)),
                     lim(limits, "aging", "promote_after_minutes", 60),
                     lim(limits, "aging", "cap_class", "P2")))
+    hold, reason = read_hold(store)
+    if hold:
+        lines.append("HOLD: admissions paused — %s" % (reason or "(no reason given)"))
     gates = limits.get("gates", {})
     lines.append("Gates: janitor cron %s; interim AGENTS.md cap %s"
                  % ("ACTIVE" if gates.get("janitor_cron_active") else "NOT active",

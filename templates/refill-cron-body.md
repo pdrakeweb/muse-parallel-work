@@ -64,7 +64,8 @@ STEP 4 — Enqueue executable items (at most 5 per run):
 - Before enqueueing, check the governor state (governor.py status and state.json) for a live or recently finished item covering the same work — same item key, same tracker id, or a near-identical title. Skip duplicates; the governor is the coordination point between chats, and another chat may already own the item.
 - Also skip any item whose disposition in refill-state.json is already enqueued.
 - For each item: write a self-contained brief to `{{GOVERNOR_DIR}}/briefs/refill-<item-slug>.md` (outcome, scope, source tracker reference, completion check, constraints from the detail docs), then run:
-  `python3 {{GOVERNOR_DIR}}/governor.py enqueue --title "<item title>" --class P3 --resource <build if the work compiles or test-gates code, else light> --owner-chat-id {{MAIN_CHAT_ID}} --owner-chat-name "governor-queue-refill" --brief-file <brief path> --idempotency-key <item key>`
+  `python3 {{GOVERNOR_DIR}}/governor.py enqueue --title "<item title>" --class P3 --resource <build if the work compiles or test-gates code, else light> --owner-chat-id {{MAIN_CHAT_ID}} --owner-chat-name "governor-queue-refill" --brief-file <brief path> --idempotency-key <item key> [--tracker-ref <Work Tracker item id>]`
+  Pass `--tracker-ref` whenever the source is a Work Tracker entry, so the worker can checkpoint and keep its item protected through long phases.
   Use --class P2 instead of P3 only when the tracker marks the item urgent or a deadline falls within 48 hours.
 - Record each enqueue in refill-state.json with the governor item id returned.
 

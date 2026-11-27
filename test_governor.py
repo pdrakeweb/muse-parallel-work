@@ -32,13 +32,12 @@ class GovernorCase(unittest.TestCase):
         self.dir = tempfile.mkdtemp(prefix="gov-test-")
         shutil.copy(os.path.join(HERE, "limits.yaml"),
                     os.path.join(self.dir, "limits.yaml"))
-        # Fixture pin: the budget/breaker tests were authored against
-        # build 1 / light 4 / total 5 / breaker 12.0 (DESIGN S4;
-        # STATUS.md). The live limits.yaml moved on (build 2 on Oct 20,
-        # 2026; light 9, total 10, breaker 15.0 on Oct 21, 2026), which
-        # silently reddens those tests; the suite tests mechanics
-        # against a fixed budget fixture, so pin the authored values
-        # here. The live limits.yaml itself is never modified.
+        # Fixture pin: the budget/breaker tests are written against
+        # build 1 / light 4 / total 5 (DESIGN S4). A deployment's live
+        # limits.yaml can move on (the reference box ran build 2, light 9,
+        # total 10, breaker 15.0 by Oct 21, 2026); pin the authored
+        # budgets so the suite tests mechanics, not one deployment's
+        # numbers. The live limits.yaml itself is never modified.
         path = os.path.join(self.dir, "limits.yaml")
         with open(path) as f:
             text = f.read()
@@ -1039,3 +1038,72 @@ class TestMalformedCheckpoints(GovernorCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestReviewFixes(GovernorCase):
+    """Regressions found in the v0.2.4 code review."""
+
+    def test_second_process_does_not_lose_first_process_write(self):
+        # Two CLI processes each build a Store (loading state) before
+        # taking the lock; the later writer must not clobber the
+        # earlier writer's item in state.json.
+        other = gov.Store(self.dir)
+        a = self.enqueue("from store one")["id"]
+        b = gov.do_enqueue(other, "from store two", now=T0)["id"]
+        fresh = gov.Store(self.dir)
+        with open(fresh.state_path) as f:
+            on_disk = json.load(f)["items"]
+        self.assertIn(a, on_disk)
+        self.assertIn(b, on_disk)
+
+    def test_release_after_steal_keeps_new_holders_lock(self):
+        self.store.acquire_lock()
+        holder = os.path.join(self.store.lock_dir, "holder.json")
+        with open(holder) as f:
+            data = json.load(f)
+        data["ts"] = time.time() - 3600  # make the first holder look dead
+        with open(holder, "w") as f:
+            json.dump(data, f)
+        thief = gov.Store(self.dir)
+        thief.acquire_lock(wait_seconds=1)  # steals the stale lock
+        self.store.release_lock()  # the original holder finally finishes
+        self.assertTrue(os.path.isdir(thief.lock_dir),
+                        "original holder deleted the thief's live lock")
+        thief.release_lock()
+        self.assertFalse(os.path.isdir(thief.lock_dir))
+
+    def test_torn_line_mid_log_does_not_truncate_rebuild(self):
+        a = self.enqueue("before the crash")["id"]
+        with open(self.store.queue_path, "a") as f:
+            f.write('{"event": "enqueue", "item": {"id": "torn')  # no newline
+        b = self.enqueue("after the crash")["id"]
+        self.store.rebuild()
+        self.assertIn(a, self.items())
+        self.assertIn(b, self.items())
+
+    def test_fanout_keeps_tracker_ref_on_parent(self):
+        out = self.enqueue("fan", fanout=2, tracker_ref="42")
+        self.assertEqual(self.items()[out["id"]]["tracker_ref"], 42)
+
+    def test_fanout_children_get_brief_file_content(self):
+        path = os.path.join(self.dir, "brief-src.md")
+        with open(path, "w") as f:
+            f.write("# real brief\n")
+        out = self.enqueue("fan", fanout=2, brief_file=path)
+        for cid in out["children"]:
+            with open(os.path.join(self.dir, self.items()[cid]["brief"])) as f:
+                self.assertEqual(f.read(), "# real brief\n")
+
+    def test_hold_file_blocks_admission_but_reconciles(self):
+        a = self.enqueue("held")["id"]
+        with open(os.path.join(self.dir, "HOLD"), "w") as f:
+            f.write("2026-11-27T03:00:00-05:00 weekly binary update\n")
+        out = self.admit()
+        self.assertEqual(out["admitted"], [])
+        self.assertTrue(out["hold"])
+        self.assertIn("weekly binary update", out["hold_reason"])
+        self.assertEqual(self.items()[a]["state"], "queued")
+        os.remove(os.path.join(self.dir, "HOLD"))
+        out = self.admit()
+        self.assertEqual(out["admitted"], [a])
+        self.assertFalse(out["hold"])
