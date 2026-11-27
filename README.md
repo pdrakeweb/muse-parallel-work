@@ -22,7 +22,7 @@ It has five layers, in adoption order:
 4. **The backlog and refill** — a general Work Tracker (projects
    General/LLMdil, six statuses, workstreams as fields and filters) as
    the backlog of record, and an hourly refill cron that scans it when
-   the governor is idle, classifies items EXECUTABLE / NEEDS PETE /
+   the governor is idle, classifies items EXECUTABLE / NEEDS USER /
    ILL-DEFINED (ill-defined items go to a council; a refined brief at
    ≥ MEDIUM confidence is enqueued), and enqueues under stable
    idempotency keys. Fill only — the refill never admits or spawns.
