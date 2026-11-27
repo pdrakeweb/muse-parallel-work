@@ -20,7 +20,7 @@
 > `admit --block-build`, `requeue-interrupted`, and
 > `extract-checkpoints` — plus the `tracker_ref` item field and the
 > worker-side `checkpoint-line` / `set-tracker-ref` commands, with
-> tests. The governor.py shipped in this skill (v0.2.4) includes them;
+> tests. The governor.py shipped in this skill (v0.2.5) includes them;
 > the reference deployment added them on Oct 21, 2026. Do not enable
 > this cron against a governor build that lacks them.
 

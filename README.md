@@ -22,7 +22,7 @@ It has five layers, in adoption order:
 4. **The backlog and refill** — a general Work Tracker (projects
    General/LLMdil, six statuses, workstreams as fields and filters) as
    the backlog of record, and an hourly refill cron that scans it when
-   the governor is idle, classifies items EXECUTABLE / NEEDS PETE /
+   the governor is idle, classifies items EXECUTABLE / NEEDS USER /
    ILL-DEFINED (ill-defined items go to a council; a refined brief at
    ≥ MEDIUM confidence is enqueued), and enqueues under stable
    idempotency keys. Fill only — the refill never admits or spawns.
@@ -50,8 +50,8 @@ built from that incident.
 
 1. Copy this folder into your agent's skills directory.
 2. Create a governor directory **under your home directory** (for example
-   `~/workspace/parallelism-governor/`) and copy `governor.py`,
-   `test_governor.py`, `limits.yaml`, `DESIGN.md`, and `REPLAY.md` into
+   `~/workspace/parallelism-governor/`) and copy `governor.py`, `brief_lint.py`,
+   `test_governor.py`, `test_brief_lint.py`, `limits.yaml`, `DESIGN.md`, and `REPLAY.md` into
    it. The governor creates its queue files (`queue.jsonl`, `state.json`,
    `briefs/`, `metrics.jsonl`) on first use.
 
@@ -65,7 +65,7 @@ built from that incident.
    2 vCPU / 7 GB VM where one build already saturates both cores.
    Measure your host first — vCPUs, RAM, one real build's peak — and
    scale by the arithmetic in the template's comments, not by preference.
-4. Verify: `python3 -m unittest test_governor` (78 tests) and
+4. Verify: `python3 -m unittest test_governor` (81 tests; plus `test_brief_lint`, 9 tests) and
    `python3 governor.py status`.
 5. Paste the filled-in section from `AGENTS-TEMPLATE.md` into the
    AGENTS.md your agent runtime loads. That template carries the dispatch
@@ -130,7 +130,8 @@ this README.
 | `templates/install-checklist.md` | The combined install checklist (governor → tracker → refill → janitor). |
 | `VERSION` | Skill version. |
 | `governor.py` | The reference implementation. |
-| `test_governor.py` | 78 tests covering budgets, promotion order, aging, fan-out, reservations, the breaker, locking, the janitor snapshot, checkpoint heartbeats, checkpoint-line generation, malformed-checkpoint flagging, the HOLD file, crash-torn log lines, and the CLI. |
+| `test_governor.py` | 81 tests covering budgets, promotion order, aging, fan-out, reservations, the breaker, locking, the janitor snapshot, checkpoint heartbeats, checkpoint-line generation, malformed-checkpoint flagging, the HOLD file, crash-torn log lines, the enqueue brief lint, and the CLI. |
+| `brief_lint.py` / `test_brief_lint.py` | Brief lint run by `enqueue`; `--fix` appends the standing artifact instruction. 9 tests. |
 | `limits.yaml` | Template limits with tuning guidance. |
 | `DESIGN.md` | The design and decision record, including the council-modifications addendum. |
 | `REPLAY.md` | The load-replay validation procedure. |

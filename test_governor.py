@@ -512,6 +512,54 @@ class TestCheckpoints(GovernorCase):
         self.assertEqual(self.items()[iid2]["tracker_ref"], 75)
 
 
+class TestEnqueueBriefLint(unittest.TestCase):
+    """CLI enqueue runs brief_lint before any queue write."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="gov-lint-")
+        shutil.copy(os.path.join(HERE, "limits.yaml"),
+                    os.path.join(self.d, "limits.yaml"))
+        self.script = os.path.join(HERE, "governor.py")
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def run_cli(self, *argv):
+        return subprocess.run(
+            [sys.executable, self.script, "--dir", self.d] + list(argv),
+            capture_output=True, text=True, timeout=30)
+
+    def _queue_lines(self):
+        path = os.path.join(self.d, "queue.jsonl")
+        if not os.path.exists(path):
+            return 0
+        with open(path) as f:
+            return sum(1 for line in f if line.strip())
+
+    def test_in_scope_brief_missing_standing_line_is_rejected(self):
+        brief = os.path.join(self.d, "b.md")
+        with open(brief, "w") as f:
+            f.write("---\noutput_type: dashboard\n---\nBuild the spend dashboard.\n")
+        r = self.run_cli("enqueue", "--title", "dash", "--brief-file", brief)
+        self.assertEqual(r.returncode, 4, r.stdout + r.stderr)
+        self.assertEqual(json.loads(r.stdout)["error"], "brief_lint")
+        self.assertEqual(self._queue_lines(), 0)
+
+    def test_fixed_brief_is_accepted(self):
+        brief = os.path.join(self.d, "b.md")
+        with open(brief, "w") as f:
+            f.write("---\noutput_type: dashboard\n---\nBuild the spend dashboard.\n")
+        subprocess.run([sys.executable, os.path.join(HERE, "brief_lint.py"),
+                        "--fix", brief], check=True, capture_output=True)
+        r = self.run_cli("enqueue", "--title", "dash", "--brief-file", brief)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_out_of_scope_brief_is_accepted(self):
+        r = self.run_cli("enqueue", "--title", "compile",
+                         "--brief-text", "Run cargo build for the router crate.")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+
 class TestCheckpointCli(unittest.TestCase):
     def test_checkpoint_cli_round_trip(self):
         d = tempfile.mkdtemp(prefix="gov-checkpoint-cli-")
@@ -1041,7 +1089,7 @@ if __name__ == "__main__":
 
 
 class TestReviewFixes(GovernorCase):
-    """Regressions found in the v0.2.4 code review."""
+    """Regressions found in the v0.2.5 code review."""
 
     def test_second_process_does_not_lose_first_process_write(self):
         # Two CLI processes each build a Store (loading state) before

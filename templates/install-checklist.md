@@ -21,13 +21,13 @@
 
 - [ ] Copy this skill folder into the skills directory.
 - [ ] Create `{{GOVERNOR_DIR}}` and copy into it: `governor.py`,
-      `test_governor.py`, `limits.yaml`, `DESIGN.md`, `REPLAY.md`.
+      `brief_lint.py`, `test_governor.py`, `test_brief_lint.py`, `limits.yaml`, `DESIGN.md`, `REPLAY.md`.
 - [ ] Tune `limits.yaml` from the measurements (build slots = the smaller
       of cores−1 and the RAM envelope; light slots from spare RAM; total =
       build + light as the starting point; breaker ≈ 2.5x vCPUs). The
       shipped numbers are the reference host's, not defaults to copy.
 - [ ] Verify: `cd {{GOVERNOR_DIR}} && python3 -m unittest test_governor`
-      (78 tests) and `python3 governor.py status`.
+      (81 tests) and `python3 governor.py status`.
 - [ ] Fill in `AGENTS-TEMPLATE.md` and paste it into the AGENTS.md the
       runtime loads. Operate chat dispatch under the interim cap +
       governor procedure from this point on; the cap stays in force for
@@ -67,7 +67,7 @@
       filled, cadence `{{REFILL_CADENCE}}` (reference: hourly).
 - [ ] Run one supervised refill pass with the governor idle. Verify: the
       idle gate was evaluated, candidates were classified
-      EXECUTABLE / NEEDS PETE / ILL-DEFINED, enqueues (if any) carry
+      EXECUTABLE / NEEDS USER / ILL-DEFINED, enqueues (if any) carry
       idempotency keys of the form `refill-<source>-<tracker item id or
       slug>`, and the log + dispositions files were written under
       `{{GOVERNOR_GOAL_WORKSPACE}}/hidden_files/`.
@@ -118,7 +118,7 @@ How to interpret the results:
       `tracker_ref` item field and the worker-side `checkpoint-line` /
       `set-tracker-ref` commands, covered by tests, with the
       pre-existing suite still green. (The governor.py shipped in this
-      skill at v0.2.4 includes these helpers; the reference deployment
+      skill at v0.2.5 includes these helpers; the reference deployment
       added them Oct 21, 2026.) Do not enable the janitor without them.
 - [ ] Confirm the gate corrections are recorded in the deployment's status
       notes: the §11 replay is **not** a janitor gate (waived by the owner

@@ -1,6 +1,6 @@
 ---
 name: "muse-parallel-work"
-version: "0.2.4"
+version: "0.2.5"
 license: MIT
 description: >
   Meter parallel sub-agent work on one shared host so batch work never
@@ -8,7 +8,7 @@ description: >
   and a file-based parallelism governor (governor.py: P2-P4 queue, admission
   passes against build/light/total budgets, aging, load breaker, HOLD file)
   plus the Work Tracker refill cron, the self-contained janitor cron, and
-  worker checkpoint heartbeats. Use when dispatching or fanning out
+  worker checkpoint heartbeats, and brief_lint.py, which rejects artifact briefs missing the standing instruction. Use when dispatching or fanning out
   sub-agents on a machine chat also runs on, when enqueueing, admitting,
   closing out, or checking governor items, when the box is overloaded or
   the queue is stuck, when tuning limits.yaml, or when installing or
@@ -23,6 +23,9 @@ when_to_use: >
   admission", or any sub-agent dispatch on a host where chat and batch
   workers share CPU, RAM, and an inference queue.
 ---
+
+Repository: https://github.com/pdrakeweb/muse-parallel-work
+
 
 # Muse Parallel Work
 
@@ -111,6 +114,21 @@ unadmitted item, and no override exists. If the user orders an immediate
 start anyway, spawn only on that explicit instruction, tell them it
 bypassed admission, and close the item normally (`done` accepts a queued item).
 
+### Brief lint — the artifact standing rule, enforced
+
+`brief_lint.py` (stdlib-only) checks a brief before enqueue: a brief whose
+output becomes an artifact, dashboard, UI, widget, wishlist, page, tracker,
+or infographic must carry the user's standing artifact instruction verbatim.
+`brief_lint.py --fix <brief>` appends it. Classification: `--artifact` /
+`--no-artifact` flags win; otherwise frontmatter `output_type` / `output`
+against the artifact type list; otherwise a keyword heuristic over the body
+that errs toward in scope.
+
+`governor.py` enqueue runs the lint first: an in-scope brief missing the
+line is rejected before any queue write (fix with `brief_lint.py --fix
+<brief>` and re-enqueue). Never bypass a rejection — fix the brief.
+Tests: `test_brief_lint.py` (`python3 -m unittest test_brief_lint`).
+
 ### Priority classes
 
 | Class | Meaning | Queued? |
@@ -192,7 +210,7 @@ its database file. The hourly `governor-queue-refill` cron **fills only**: it
 never admits, never spawns, and never edits a tracker. It runs only when the
 system is idle (no HOLD; 0 running, 0 admitted, 0 queued; load1 under the
 breaker as shown by `status`). It classifies candidates as EXECUTABLE,
-NEEDS PETE (any decision, spend, booking, send, delete, or account change),
+NEEDS USER (any decision, spend, booking, send, delete, or account change),
 or ILL-DEFINED (sent to council, at most 2 per run, with a 7-day cooldown;
 enqueued at confidence of MEDIUM or higher). It enqueues at most 5 per run at
 P3 (P2 if marked urgent or due within 48 h), using the stable key
@@ -224,6 +242,19 @@ an accounting action, never a kill. The janitor never enqueues, never edits
 the main chat only on ticks that took action (supervised mode). Full
 design: `references/janitor.md`. Cron body: `templates/janitor-cron-body.md`.
 
+## Brief lint
+
+`enqueue` runs `brief_lint.py` (it must sit beside `governor.py`) before any
+queue write. A brief whose output becomes an artifact, dashboard, UI,
+widget, wishlist, page, tracker, or infographic must carry the user's
+standing artifact instruction word for word. A brief that lacks it is
+rejected with exit code 4 and `{"error": "brief_lint"}`. Fix it with
+`python3 brief_lint.py --fix <brief>` and enqueue again. Never get around a
+rejection by rewording the brief to dodge the classifier. Classification:
+`--artifact`/`--no-artifact` on brief_lint, then frontmatter
+`output_type`/`output`, then a body keyword heuristic that errs toward in
+scope.
+
 ## Control cron inventory
 
 | Cron | Cadence | Role | Boundary |
@@ -244,21 +275,22 @@ crons and never touch the queue.
 3. `light_slots` from spare RAM (~150-250 MB each). `total_workers` = build
    + light to start.
 4. Breaker at ~2.5 x vCPUs.
-5. Run `python3 -m unittest test_governor` (78 tests). `REPLAY.md` is
+5. Run `python3 -m unittest test_governor test_brief_lint` (81 + 9 tests). `REPLAY.md` is
    optional validation, not a gate.
 
 ## Install and files
 
 Follow `templates/install-checklist.md`: copy the skill, create the
-governor directory under home with `governor.py`, `test_governor.py`,
-`limits.yaml`, `DESIGN.md`, and `REPLAY.md`, tune, verify, paste the
+governor directory under home with `governor.py`, `brief_lint.py`, `test_governor.py`,
+`test_brief_lint.py`, `limits.yaml`, `DESIGN.md`, and `REPLAY.md`, tune, verify, paste the
 filled-in `AGENTS-TEMPLATE.md` into AGENTS.md, then add the tracker, the
 refill cron, and the janitor cron, in that order.
 
 | File | Role |
 |---|---|
 | `AGENTS-TEMPLATE.md` | AGENTS.md section future sessions load |
-| `governor.py` / `test_governor.py` | Reference implementation (stdlib Python 3) and 78-test suite |
+| `governor.py` / `test_governor.py` | Reference implementation (stdlib Python 3) and 81-test suite |
+| `brief_lint.py` / `test_brief_lint.py` | Brief lint run by `enqueue`; `--fix` appends the standing artifact instruction |
 | `limits.yaml` | Template limits with derivations |
 | `DESIGN.md` / `REPLAY.md` | Design and decision record; optional load-replay validation |
 | `references/janitor.md` | Janitor design, reconciliation, checkpoints, conservative admission |

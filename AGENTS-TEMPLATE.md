@@ -183,7 +183,7 @@ every chat:
 - Refill: the `governor-queue-refill` cron (hourly, owner
   `{{OWNER_GOAL}}`) scans the trackers only when the governor is fully
   idle (no HOLD, 0 running/admitted, 0 queued, load below the breaker),
-  classifies items EXECUTABLE / NEEDS PETE / ILL-DEFINED, sends
+  classifies items EXECUTABLE / NEEDS USER / ILL-DEFINED, sends
   ill-defined items to a council (a refined brief at ≥ MEDIUM confidence
   may be enqueued), and enqueues at most 5 items per run under stable
   idempotency keys (`refill-<source>-<tracker item id or slug>`). It

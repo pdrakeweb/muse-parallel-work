@@ -1,6 +1,6 @@
 # History and evidence
 
-<!-- Moved verbatim from SKILL.md in v0.2.4. SKILL.md keeps the operating summary; this file holds the full rules and their evidence. -->
+<!-- Moved verbatim from SKILL.md in v0.2.5. SKILL.md keeps the operating summary; this file holds the full rules and their evidence. -->
 
 
 ## Why this exists (the Oct 18, 2026 incident)

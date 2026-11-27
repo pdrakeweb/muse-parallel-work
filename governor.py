@@ -1045,6 +1045,35 @@ def _load_tracker_entries(path):
     return raw
 
 
+def _lint_brief(brief_text, brief_file):
+    """Run brief_lint on the enqueue brief before any queue write.
+
+    Returns an error string when an in-scope brief lacks the standing
+    artifact instruction, else None. brief_lint.py must sit beside
+    governor.py; a missing linter is reported, not silently skipped.
+    """
+    text = brief_text
+    if text is None and brief_file:
+        with open(brief_file) as f:
+            text = f.read()
+    if text is None:
+        return None
+    try:
+        import importlib.util
+        here = os.path.dirname(os.path.abspath(__file__))
+        spec = importlib.util.spec_from_file_location(
+            "brief_lint", os.path.join(here, "brief_lint.py"))
+        if spec is None or not os.path.exists(spec.origin):
+            raise ImportError
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+    except ImportError:
+        return ("brief_lint.py not found beside governor.py; copy it into "
+                "the governor directory (see templates/install-checklist.md)")
+    ok, why = mod.lint_text(text)
+    return None if ok else why
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="governor.py",
                                  description="Parallelism governor (DESIGN.md)")
@@ -1129,6 +1158,11 @@ def main(argv=None):
     store = Store(args.dir)
     try:
         if args.cmd == "enqueue":
+            lint_error = _lint_brief(args.brief_text, args.brief_file)
+            if lint_error:
+                print(json.dumps({"error": "brief_lint", "detail": lint_error,
+                                  "fix": "python3 brief_lint.py --fix <brief>"}))
+                return 4
             out = do_enqueue(store, args.title, cls=args.cls,
                              resource=args.resource,
                              owner_chat_id=args.owner_chat_id,

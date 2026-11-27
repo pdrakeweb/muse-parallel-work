@@ -1,6 +1,6 @@
 # The self-contained janitor — full reference
 
-<!-- Moved verbatim from SKILL.md in v0.2.4. SKILL.md keeps the operating summary; this file holds the full rules and their evidence. -->
+<!-- Moved verbatim from SKILL.md in v0.2.5. SKILL.md keeps the operating summary; this file holds the full rules and their evidence. -->
 
 The governor is a metering layer, not an executor: before the janitor,
 admission passes happened only when a chat dispatched or closed out
@@ -227,7 +227,7 @@ The janitor depends on four governor commands — `janitor-snapshot`
 `requeue-interrupted`, and `extract-checkpoints` — plus the
 `tracker_ref` item field and the worker-side `checkpoint-line` and
 `set-tracker-ref` commands. The `governor.py` shipped in this skill
-(v0.2.4) includes all of them, with unit tests (snapshot protection
+(v0.2.5) includes all of them, with unit tests (snapshot protection
 rules including checkpoints, checkpoint-line generation and refusals,
 mid-paragraph marker parsing, malformed-checkpoint flagging, the
 block-build pass, the /proc compiler scan, interrupted requeue under

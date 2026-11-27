@@ -57,7 +57,7 @@ STEP 2 — Scan every work tracker for pending items:
 
 STEP 3 — Classify each pending item:
 - EXECUTABLE: a self-contained worker brief can be written from the tracker entry plus its linked detail (goal doc, artifact record) without inventing any decision the owner has not made. It has a concrete outcome, an identifiable scope and workspace, and a checkable completion condition.
-- NEEDS PETE (not council material, never enqueued): the item's next step is a decision, approval, purchase, booking, send, deletion, or policy choice that is the owner's to make.
+- NEEDS USER (not council material, never enqueued): the item's next step is a decision, approval, purchase, booking, send, deletion, or policy choice that is the owner's to make.
 - ILL-DEFINED: pending and plausibly executable, but too underspecified to brief (missing scope, outcome, or completion condition) and not blocked on an owner decision. These go to council in Step 5.
 
 STEP 4 — Enqueue executable items (at most 5 per run):
@@ -73,11 +73,11 @@ STEP 5 — Council refinement for ill-defined items (at most 2 councils per run)
 - Skip items already sent to a council in the last 7 days per refill-state.json; defer the rest to later idle runs.
 - Run each council using the council skill (read `{{COUNCIL_SKILL_PATH}}` first): classic panel, 2 rounds. The council brief carries the tracker item verbatim, all context found in its detail docs, and one question: define this work item into an executable brief (outcome, scope, completion check), or rule that an owner decision is required and state exactly which decision.
 - If the council produces an executable brief with at least MEDIUM confidence: write the brief and enqueue it as in Step 4 (counts toward the 5-per-run cap), and record the disposition.
-- If the council rules an owner decision is required, or confidence is below MEDIUM: do not enqueue. Record disposition needs-pete with the council's stated decision question.
+- If the council rules an owner decision is required, or confidence is below MEDIUM: do not enqueue. Record disposition needs-user with the council's stated decision question.
 
 STEP 6 — Report to the main chat ONLY when this run did something:
 - Items enqueued: title, class, resource, source tracker, and the governor item id.
-- Needs-Pete items (from Step 3 classification or Step 5 councils): the item and the exact decision it waits on. Report each needs-Pete item once; do not re-report it on later runs unless 7 days have passed or its tracker entry changed.
+- Needs-User items (from Step 3 classification or Step 5 councils): the item and the exact decision it waits on. Report each needs-user item once; do not re-report it on later runs unless 7 days have passed or its tracker entry changed.
 - Stay silent when the system was not idle, when no pending items were found, or when everything found was already dispositioned.
 
-Hard limits: never enqueue work that spends money, books, sends messages, deletes data, or changes an account — those are needs-Pete by definition. Never modify governor.py, limits.yaml, or the live queue beyond governor.py enqueue calls. Never edit tracker artifacts; read them only.
+Hard limits: never enqueue work that spends money, books, sends messages, deletes data, or changes an account — those are needs-user by definition. Never modify governor.py, limits.yaml, or the live queue beyond governor.py enqueue calls. Never edit tracker artifacts; read them only.

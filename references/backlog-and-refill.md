@@ -1,6 +1,6 @@
 # The backlog: the Work Tracker and the refill cron — full reference
 
-<!-- Moved verbatim from SKILL.md in v0.2.4. SKILL.md keeps the operating summary; this file holds the full rules and their evidence. -->
+<!-- Moved verbatim from SKILL.md in v0.2.5. SKILL.md keeps the operating summary; this file holds the full rules and their evidence. -->
 
 The governor queue coordinates work that is ready to run. It is not a
 backlog: items enter it when someone (or some cron) has decided the work
@@ -73,11 +73,11 @@ is `templates/refill-cron-body.md`; the operating summary:
      the tracker entry plus its linked detail without inventing a
      decision the owner has not made: concrete outcome, identifiable
      scope and workspace, checkable completion condition.
-   - **NEEDS PETE** — the next step is a decision, approval, purchase,
+   - **NEEDS USER** — the next step is a decision, approval, purchase,
      booking, send, deletion, or policy choice belonging to the owner.
      Never enqueued, and not council material. Work that spends money,
      books, sends messages, deletes data, or changes an account is
-     NEEDS PETE by definition.
+     NEEDS USER by definition.
    - **ILL-DEFINED** — plausibly executable but missing scope, outcome,
      or completion condition, and not blocked on an owner decision.
      These go to council (below).
@@ -106,12 +106,12 @@ is `templates/refill-cron-body.md`; the operating summary:
    brief — outcome, scope, completion check — or rule that an owner
    decision is required and state exactly which decision. A refined brief
    at **≥ MEDIUM confidence** is written and enqueued under the normal
-   rules. A Pete-decision ruling, or confidence below MEDIUM, is
-   recorded as a `needs-pete` disposition with the exact decision
+   rules. A user-decision ruling, or confidence below MEDIUM, is
+   recorded as a `needs-user` disposition with the exact decision
    question, and nothing is enqueued.
 6. **Report** to the main chat only when the run did something: enqueued
    items (title, class, resource, source tracker, governor item id) and
-   Needs-Pete items with the exact pending decision. Each Needs-Pete
+   Needs-User items with the exact pending decision. Each Needs-User
    item is reported once; it is not re-reported unless 7 days have
    passed or its tracker entry changed. Not-idle runs, empty scans, and
    fully-dispositioned scans stay silent.
