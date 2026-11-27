@@ -67,7 +67,7 @@
       filled, cadence `{{REFILL_CADENCE}}` (reference: hourly).
 - [ ] Run one supervised refill pass with the governor idle. Verify: the
       idle gate was evaluated, candidates were classified
-      EXECUTABLE / NEEDS PETE / ILL-DEFINED, enqueues (if any) carry
+      EXECUTABLE / NEEDS USER / ILL-DEFINED, enqueues (if any) carry
       idempotency keys of the form `refill-<source>-<tracker item id or
       slug>`, and the log + dispositions files were written under
       `{{GOVERNOR_GOAL_WORKSPACE}}/hidden_files/`.
